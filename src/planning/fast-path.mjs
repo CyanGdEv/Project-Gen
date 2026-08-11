@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { evaluatePlanningAuthority } from "./authority-gate.mjs";
 import { automaticConsensusGroups, registrationVariantScore } from "./georeference.mjs";
+import { applyPlanningFeatureAuthority } from "./osm-feature-authority.mjs";
 import { planningRegistrationKey, planningRenderKey, planningSemanticKey, planningStrongGeoreferenceKey, planningVectorKey } from "./cache-keys.mjs";
 import { normalizePlanningVectors } from "./vectorize.mjs";
 
@@ -79,13 +79,6 @@ function recordFailure(metrics, stage, error) {
   metrics.pageFailureCodes[code] = Number(metrics.pageFailureCodes[code] || 0) + 1;
 }
 
-function recordAuthorityRejection(metrics, evaluation) {
-  metrics.authorityRejected += 1;
-  for (const reason of evaluation.reasons || []) {
-    metrics.authorityRejectionReasons[reason] = Number(metrics.authorityRejectionReasons[reason] || 0) + 1;
-  }
-}
-
 async function resolvePageRegistration({ cache, processors, document, page, render, semantics, semanticHash, referenceHash, bbox, options, metrics }) {
   if (typeof processors.resolveStrongGeoreference === "function") {
     const strongKey = planningStrongGeoreferenceKey({
@@ -131,7 +124,7 @@ async function resolvePageRegistration({ cache, processors, document, page, rend
   return { ...registration, source: "visual" };
 }
 
-export async function runPlanningFastPath({ documents, cache, processors, referenceHash = null, bbox = null, options = {} }) {
+export async function runPlanningFastPath({ documents, cache, processors, referenceHash = null, referenceFeatures = [], bbox = null, options = {} }) {
   if (!cache) throw new Error("planning fast path requires cache");
   for (const name of ["renderPage", "extractSemantics", "registerPage", "vectorizePage"]) {
     if (typeof processors?.[name] !== "function") throw new Error(`planning fast path requires processors.${name}()`);
@@ -151,9 +144,13 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     vectorFailures: 0,
     directGeoreferences: 0,
     consensusGeoreferences: 0,
+    candidateDocuments: 0,
+    candidateFeatures: 0,
     authorityAccepted: 0,
     authorityRejected: 0,
-    authorityRejectionReasons: {}
+    authorityAcceptedDocuments: 0,
+    authorityRejectionReasons: {},
+    authorityActions: {}
   };
 
   const prepared = await mapConcurrent(documents, concurrency, async (document) => {
@@ -214,8 +211,6 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       id: document.id || document.sha256,
       sourceSha256: document.sha256,
       applicationReference: document.applicationReference || "unknown",
-      // Real planning-prefetch ingress always supplies an explicit status string, including "unknown".
-      // Preserve a genuinely absent status here so legacy/synthetic fixtures are not misclassified as real unknown-status evidence.
       applicationStatus: document.applicationStatus ?? null,
       document,
       pages: pageResults,
@@ -242,33 +237,13 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
   const candidateAcceptedIds = new Set([...consensus.accepted, ...directSelected.keys()]);
   metrics.directGeoreferences = directSelected.size;
   metrics.consensusGeoreferences = consensus.accepted.size;
+  metrics.candidateDocuments = candidateAcceptedIds.size;
 
-  const authorityAcceptedIds = new Set();
-  const authorityEvaluations = [];
-  for (const entry of prepared) {
-    if (!candidateAcceptedIds.has(entry.id)) continue;
-    const candidate = selectedCandidates.get(entry.id);
-    const evaluation = options.enforceAuthorityGate === false
-      ? { accepted: true, mode: "disabled", applicationStatus: entry.applicationStatus, applicationStatusEligible: true, confidence: Number(candidate?.confidence || 0), overlap: null, offsetM: null, thresholds: null, reasons: [] }
-      : evaluatePlanningAuthority(candidate, {
-          bbox,
-          locationPrior: entry.document?.locationPrior || null,
-          applicationStatus: entry.applicationStatus,
-          minConfidence: options.planningAuthorityMinConfidence,
-          minOverlap: options.planningAuthorityMinOverlap,
-          maxOffsetM: options.planningAuthorityMaxOffsetM
-        });
-    authorityEvaluations.push({ id: entry.id, applicationReference: entry.applicationReference, method: candidate?.method || null, directAuthority: Boolean(candidate?.directAuthority), ...evaluation });
-    if (evaluation.accepted) {
-      authorityAcceptedIds.add(entry.id);
-      metrics.authorityAccepted += 1;
-    } else {
-      recordAuthorityRejection(metrics, evaluation);
-    }
-  }
-
-  const authorityDocuments = prepared.filter((entry) => authorityAcceptedIds.has(entry.id));
-  const vectorizedRaw = await mapConcurrent(authorityDocuments, concurrency, async (entry) => {
+  // Registration establishes a defensible page-to-world transform. The Phase 18
+  // confidence/overlap/displacement/ambiguity authority gates apply to the extracted
+  // planning features against compatible reference features, not to the entire PDF.
+  const candidateDocuments = prepared.filter((entry) => candidateAcceptedIds.has(entry.id));
+  const vectorizedRaw = await mapConcurrent(candidateDocuments, concurrency, async (entry) => {
     const selectedCandidate = selectedCandidates.get(entry.id);
     const selectedPage = entry.pages.find((page) => page.page === Number(selectedCandidate?.page || entry.selectedPage))
       || entry.pages.find((page) => page.candidate === selectedCandidate)
@@ -305,7 +280,40 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       return null;
     }
   });
-  const vectorized = vectorizedRaw.filter(Boolean);
+  const vectorizedCandidates = vectorizedRaw.filter(Boolean);
+  const candidateFeatures = vectorizedCandidates.flatMap((entry) => entry.features);
+  metrics.candidateFeatures = candidateFeatures.length;
+
+  const authority = options.enforceAuthorityGate === false
+    ? {
+        accepted: candidateFeatures.map((feature) => ({
+          ...feature,
+          properties: { ...(feature.properties || {}), planningWorldAuthority: true, planningAuthorityAction: "disabled-test-mode", osmWorldRenderable: false }
+        })),
+        evaluations: candidateFeatures.map((feature) => ({ featureId: feature.id || null, accepted: true, action: "disabled-test-mode", reasons: [] })),
+        actions: { "disabled-test-mode": candidateFeatures.length },
+        rejectionReasons: {}
+      }
+    : applyPlanningFeatureAuthority(candidateFeatures, referenceFeatures, {
+        bbox,
+        minConfidence: Number(options.planningAuthorityMinConfidence ?? 0.86),
+        minOverlap: Number(options.planningAuthorityMinOverlap ?? 0.18),
+        maxOffsetM: Number(options.planningAuthorityMaxOffsetM ?? 25),
+        toleranceM: Number(options.planningAuthorityToleranceM ?? 3),
+        allowGapFill: options.planningAuthorityAllowGapFill !== false
+      });
+
+  metrics.authorityAccepted = authority.accepted.length;
+  metrics.authorityRejected = authority.evaluations.length - authority.accepted.length;
+  metrics.authorityRejectionReasons = authority.rejectionReasons;
+  metrics.authorityActions = authority.actions;
+
+  const acceptedFeatureIds = new Set(authority.accepted.map((feature) => String(feature.id)));
+  const authorityAcceptedIds = new Set(authority.accepted.map((feature) => feature.properties?.documentId).filter(Boolean));
+  metrics.authorityAcceptedDocuments = authorityAcceptedIds.size;
+  const vectorized = vectorizedCandidates
+    .map((entry) => ({ ...entry, features: entry.features.filter((feature) => acceptedFeatureIds.has(String(feature.id))) }))
+    .filter((entry) => entry.features.length > 0);
 
   const directAuthorityAcceptedIds = [...directSelected.keys()].filter((id) => authorityAcceptedIds.has(id));
   const consensusAuthorityAcceptedIds = [...consensus.accepted].filter((id) => authorityAcceptedIds.has(id));
@@ -324,10 +332,15 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       minimumConfidence: consensus.minimumConfidence,
       maxSeparationM: consensus.maxSeparationM,
       authority: {
+        level: "planning-feature",
+        mode: "planning-authoritative-reference-validation-only",
         minConfidence: Number(options.planningAuthorityMinConfidence ?? 0.86),
         minOverlap: Number(options.planningAuthorityMinOverlap ?? 0.18),
         maxOffsetM: Number(options.planningAuthorityMaxOffsetM ?? 25),
-        evaluations: authorityEvaluations
+        toleranceM: Number(options.planningAuthorityToleranceM ?? 3),
+        allowGapFill: options.planningAuthorityAllowGapFill !== false,
+        referenceWorldRenderable: false,
+        evaluations: authority.evaluations
       }
     },
     consensus: {
@@ -337,8 +350,9 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       minimumConfidence: consensus.minimumConfidence,
       maxSeparationM: consensus.maxSeparationM
     },
-    features: vectorized.flatMap((entry) => entry.features),
+    features: authority.accepted,
     vectorized,
+    vectorizedCandidates,
     metrics
   };
 }
