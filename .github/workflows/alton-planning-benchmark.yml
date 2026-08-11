@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src/planning/prefetch-hydrate.mjs"
+      - "src/planning/native-workers.mjs"
       - "src/sources/osm-overpass.mjs"
       - "src/sources/http-json.mjs"
       - "scripts/hydrate-planning-prefetch.mjs"
