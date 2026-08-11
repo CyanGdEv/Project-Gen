@@ -7,6 +7,8 @@ import { extractSemanticAnchorsFromTsv } from "./semantics.mjs";
 
 const DEFAULT_REGISTER_TIMEOUT_MS = 25000;
 const DEFAULT_TOOL_TIMEOUT_MS = 15000;
+const DEFAULT_RENDER_TIMEOUT_MS = 30000;
+const DEFAULT_SEMANTIC_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_STDOUT_BYTES = 32 * 1024 * 1024;
 
 function safeToken(value) {
@@ -29,6 +31,23 @@ function documentPath(document) {
   return path.resolve(filename);
 }
 
+function terminateProcessTree(child, signal = "SIGKILL") {
+  if (!child?.pid) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall through to killing the direct child when the process group has already exited.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The process may already have exited; timeout/error handling remains deterministic.
+  }
+}
+
 async function runTool(command, args, options = {}) {
   const timeoutMs = Math.max(100, Number(options.timeoutMs || DEFAULT_TOOL_TIMEOUT_MS));
   const maxStdoutBytes = Math.max(1024, Number(options.maxStdoutBytes || DEFAULT_MAX_STDOUT_BYTES));
@@ -37,39 +56,35 @@ async function runTool(command, args, options = {}) {
       cwd: options.cwd,
       env: { ...process.env, ...(options.env || {}) },
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== "win32"
     });
     const stdout = [];
     const stderr = [];
     let stdoutBytes = 0;
     let settled = false;
+
+    function rejectAndTerminate(error) {
+      if (settled) return;
+      settled = true;
+      terminateProcessTree(child);
+      clearTimeout(timer);
+      reject(error);
+    }
+
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      if (!settled) {
-        settled = true;
-        reject(new Error(`${command} timed out after ${timeoutMs}ms`));
-      }
+      rejectAndTerminate(new Error(`${command} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > maxStdoutBytes) {
-        child.kill("SIGKILL");
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(new Error(`${command} exceeded stdout limit ${maxStdoutBytes}`));
-        }
+        rejectAndTerminate(new Error(`${command} exceeded stdout limit ${maxStdoutBytes}`));
         return;
       }
       stdout.push(chunk);
     });
     child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    });
+    child.on("error", (error) => rejectAndTerminate(error));
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
@@ -104,20 +119,27 @@ export function createNativePlanningProcessors(options = {}) {
   const python = options.python || "python3";
   const registrationScript = path.resolve(options.registrationScript || fileURLToPath(new URL("./planning_auto_register.py", import.meta.url)));
   const toolTimeoutMs = Math.max(1000, Number(options.toolTimeoutMs || DEFAULT_TOOL_TIMEOUT_MS));
+  const renderTimeoutMs = Math.max(toolTimeoutMs, Number(options.renderTimeoutMs || DEFAULT_RENDER_TIMEOUT_MS));
+  const semanticTimeoutMs = Math.max(toolTimeoutMs, Number(options.semanticTimeoutMs || DEFAULT_SEMANTIC_TIMEOUT_MS));
   const registerTimeoutMs = Math.max(toolTimeoutMs, Number(options.registerTimeoutMs || DEFAULT_REGISTER_TIMEOUT_MS));
   const semanticMinConfidence = Number(options.semanticMinConfidence ?? 35);
 
   async function renderPage({ document, page, dpi }) {
     const source = documentPath(document);
     const mime = String(document?.mime || "").toLowerCase();
-    const key = `${safeToken(document.sha256 || document.id)}-p${Number(page)}-${Number(dpi)}`;
+    const documentId = safeToken(document.sha256 || document.id);
+    const key = `${documentId}-p${Number(page)}-${Number(dpi)}`;
     const directory = path.join(artifactRoot, "renders");
     await mkdir(directory, { recursive: true });
     const target = path.join(directory, `${key}.png`);
 
     if (mime === "application/pdf" || source.toLowerCase().endsWith(".pdf")) {
       const base = target.slice(0, -4);
-      await runTool(pdftoppm, ["-f", String(page), "-l", String(page), "-singlefile", "-png", "-r", String(dpi), source, base], { timeoutMs: toolTimeoutMs });
+      try {
+        await runTool(pdftoppm, ["-f", String(page), "-l", String(page), "-singlefile", "-png", "-r", String(dpi), source, base], { timeoutMs: renderTimeoutMs });
+      } catch (error) {
+        throw new Error(`planning raster failed document=${documentId} page=${Number(page)} dpi=${Number(dpi)}: ${error.message}`, { cause: error });
+      }
     } else {
       if (Number(page) !== 1) throw new Error(`image planning document only supports page 1: ${source}`);
       await copyFile(source, target);
@@ -147,11 +169,16 @@ export function createNativePlanningProcessors(options = {}) {
     }
   }
 
-  async function extractSemantics({ render }) {
-    const { stdout } = await runTool(tesseract, [render.path, "stdout", "--dpi", String(render.dpi || 240), "tsv"], {
-      timeoutMs: toolTimeoutMs,
-      maxStdoutBytes: 16 * 1024 * 1024
-    });
+  async function extractSemantics({ document, page, render }) {
+    let stdout;
+    try {
+      ({ stdout } = await runTool(tesseract, [render.path, "stdout", "--dpi", String(render.dpi || 240), "tsv"], {
+        timeoutMs: semanticTimeoutMs,
+        maxStdoutBytes: 16 * 1024 * 1024
+      }));
+    } catch (error) {
+      throw new Error(`planning OCR failed document=${safeToken(document?.sha256 || document?.id)} page=${Number(page)}: ${error.message}`, { cause: error });
+    }
     const parsed = extractSemanticAnchorsFromTsv(stdout, { minConfidence: semanticMinConfidence });
     return { ...parsed, engine: "tesseract-tsv", tsvSha256: createHash("sha256").update(stdout).digest("hex") };
   }
@@ -198,6 +225,7 @@ export function createNativePlanningProcessors(options = {}) {
       artifactRoot,
       referenceImagePath,
       registrationScript,
+      timeouts: { toolTimeoutMs, renderTimeoutMs, semanticTimeoutMs, registerTimeoutMs },
       tools: { pdftoppm, tesseract, python }
     }
   };
@@ -212,4 +240,4 @@ export async function nativePlanningWorkerSelfTest(options = {}) {
   return result;
 }
 
-export { runTool, sha256File };
+export { runTool, sha256File, terminateProcessTree };
