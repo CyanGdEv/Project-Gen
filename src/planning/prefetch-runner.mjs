@@ -4,6 +4,7 @@ import { FileArtifactCache } from "../cache.mjs";
 import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
+import { createPlanningProcessorProfiler, createTimingAccumulator } from "./profiler.mjs";
 import { buildPlanningReference } from "./reference-raster.mjs";
 import { resolveStrongGeoreference } from "./strong-georeference.mjs";
 
@@ -169,20 +170,21 @@ export async function runPlanningPrefetchFastPath(options = {}) {
   if (!options.planningDirectory) throw new Error("planningDirectory is required");
   if (!options.bbox) throw new Error("bbox is required");
 
+  const timing = createTimingAccumulator();
   const cache = options.cache || new FileArtifactCache(options.cacheRoot || ".project-gen-cache/artifacts");
-  const ingestion = await ingestPlanningPrefetch(options.planningDirectory, {
+  const ingestion = await timing.measure("ingestPrefetch", () => ingestPlanningPrefetch(options.planningDirectory, {
     cache,
     maxDocuments: options.maxDocuments,
     verificationConcurrency: options.verificationConcurrency
-  });
-  const documents = await preparePrefetchDocuments(options.planningDirectory, ingestion, options);
+  }));
+  const documents = await timing.measure("prepareDocuments", () => preparePrefetchDocuments(options.planningDirectory, ingestion, options));
 
   let resolvedReference = null;
   let referencePromise = null;
   async function ensureVisualReference() {
     if (resolvedReference) return resolvedReference;
     if (referencePromise) return referencePromise;
-    referencePromise = (async () => {
+    referencePromise = timing.measure("buildVisualReference", async () => {
       if (options.referenceImagePath) {
         const referenceImagePath = path.resolve(options.referenceImagePath);
         const referenceHash = options.referenceHash || await sha256File(referenceImagePath);
@@ -207,15 +209,16 @@ export async function runPlanningPrefetchFastPath(options = {}) {
         reference
       };
       return resolvedReference;
-    })();
+    });
     return referencePromise;
   }
 
-  const processors = createPriorityPlanningProcessors({ ...options, cache, ensureVisualReference });
-  const result = await runPlanningFastPath({
+  const priorityProcessors = createPriorityPlanningProcessors({ ...options, cache, ensureVisualReference });
+  const profiler = createPlanningProcessorProfiler(priorityProcessors);
+  const result = await timing.measure("planningFastPath", () => runPlanningFastPath({
     documents,
     cache,
-    processors,
+    processors: profiler.processors,
     referenceHash: options.referenceHash || null,
     bbox: options.bbox,
     options: {
@@ -230,7 +233,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       planningAutomaticRegistrationMinConfidence: options.planningAutomaticRegistrationMinConfidence,
       planningAutomaticRegistrationConsensusDocuments: options.planningAutomaticRegistrationConsensusDocuments
     }
-  });
+  }));
   return {
     source: "planning",
     status: "usable",
@@ -242,7 +245,12 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     processedDocuments: documents.length,
     reference: resolvedReference?.reference || { role: "registration-context-only", status: "not-needed" },
     referenceHash: resolvedReference?.referenceHash || null,
-    ...result
+    ...result,
+    metrics: {
+      ...result.metrics,
+      processorTimings: profiler.snapshot(),
+      orchestrationTimings: timing.snapshot()
+    }
   };
 }
 
