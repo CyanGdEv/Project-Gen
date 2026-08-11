@@ -1,0 +1,35 @@
+name: Project Gen CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install native planning tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv gdal-bin
+          pdftoppm -v
+          tesseract --version | head -n 1
+          gdalinfo --version
+          gdaltransform --version
+          python3 -c 'import cv2; print(cv2.__version__)'
+      - run: npm run check
+      - name: Compile and self-test native planning workers
+        run: |
+          python3 -m py_compile src/planning/planning_auto_register.py
+          python3 -m py_compile src/planning/planning_reference.py
+          npm run worker:self-test
+      - run: npm test
