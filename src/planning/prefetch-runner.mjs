@@ -91,6 +91,13 @@ async function mapConcurrent(items, concurrency, worker) {
   return output;
 }
 
+function recoverableReferenceError(message) {
+  const error = new Error(message);
+  error.code = "PLANNING_REFERENCE_UNAVAILABLE";
+  error.recoverablePlanningPage = true;
+  return error;
+}
+
 export async function preparePrefetchDocuments(planningDirectory, ingestion, options = {}) {
   const root = path.resolve(planningDirectory);
   const manifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
@@ -130,7 +137,7 @@ export function createPriorityPlanningProcessors(options = {}) {
   async function getVisualRegistrationContext() {
     if (visualContext) return visualContext;
     if (typeof options.ensureVisualReference !== "function") {
-      if (!options.referenceImagePath) throw new Error("visual planning registration requires a reference source");
+      if (!options.referenceImagePath) throw recoverableReferenceError("visual planning registration requires a reference source");
       const referenceImagePath = path.resolve(options.referenceImagePath);
       visualContext = {
         referenceImagePath,
@@ -139,7 +146,9 @@ export function createPriorityPlanningProcessors(options = {}) {
       return visualContext;
     }
     visualContext = await options.ensureVisualReference();
-    if (!visualContext?.referenceImagePath || !visualContext?.referenceHash) throw new Error("visual reference resolver returned an incomplete context");
+    if (!visualContext?.referenceImagePath || !visualContext?.referenceHash) {
+      throw recoverableReferenceError("visual reference resolver returned an incomplete context");
+    }
     return visualContext;
   }
 
@@ -212,7 +221,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
         return resolvedReference;
       }
       const source = options.referenceSource || options.osmSource || null;
-      if (!source?.payload) throw new Error("visual registration fallback requires referenceImagePath or referenceSource payload");
+      if (!source?.payload) throw recoverableReferenceError("visual registration fallback unavailable because the reference source could not be acquired");
       const reference = await buildPlanningReference({
         source,
         bbox: options.bbox,
@@ -266,7 +275,10 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       stats: ingestion.stats
     },
     processedDocuments: documents.length,
-    reference: resolvedReference?.reference || { role: "registration-context-only", status: "not-needed" },
+    reference: resolvedReference?.reference || {
+      role: "registration-context-only",
+      status: options.osmSource?.status === "unavailable" ? "unavailable" : "not-needed"
+    },
     referenceHash: resolvedReference?.referenceHash || null,
     referenceFeatureCount: referenceFeatures.length,
     ...result,
@@ -280,4 +292,4 @@ export async function runPlanningPrefetchFastPath(options = {}) {
   };
 }
 
-export { documentPages, metadataIndex, locationPrior };
+export { documentPages, metadataIndex, locationPrior, recoverableReferenceError };
