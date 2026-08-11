@@ -46,7 +46,7 @@ jobs:
           restore-keys: |
             alton-planning-docs-${{ runner.os }}-
       - name: Hydrate real planning documents with manifest verification
-        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000 --attempt-timeout-ms 20000 --retries 4 --retry-delay-ms 1500
+        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000 --retries 4 --retry-delay-ms 1500
       - name: Save verified planning evidence for later benchmark attempts
         if: always()
         uses: actions/cache/save@v4
