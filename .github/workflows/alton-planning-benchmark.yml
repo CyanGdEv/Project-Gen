@@ -7,9 +7,11 @@ on:
       - "src/planning/native-workers.mjs"
       - "src/planning/fast-path.mjs"
       - "src/planning/prefetch-runner.mjs"
+      - "src/planning/pdf-text-semantics.mjs"
       - "src/planning/profiler.mjs"
       - "src/planning/strong-georeference.mjs"
       - "src/planning/reference-raster.mjs"
+      - "src/sources/planning-prefetch.mjs"
       - "src/sources/osm-overpass.mjs"
       - "src/sources/http-json.mjs"
       - "scripts/hydrate-planning-prefetch.mjs"
@@ -59,6 +61,34 @@ jobs:
         run: |
           rm -rf .alton-benchmark-cache benchmark-output/cold benchmark-output/warm
           npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/cold --cache .alton-benchmark-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
+      - name: Publish cold planning profile
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const cold = JSON.parse(fs.readFileSync('benchmark-output/cold/planning-pass-report.json'));
+          const profile = {
+            timings: cold.timings,
+            withinFiveMinuteTarget: cold.withinFiveMinuteTarget,
+            processedDocuments: cold.planning.processedDocuments,
+            candidateAcceptedDocuments: cold.planning.candidateAcceptedDocuments,
+            authorityAcceptedDocuments: cold.planning.acceptedDocuments,
+            features: cold.planning.features,
+            cacheAndWorkers: cold.planning.metrics,
+            authorityGate: cold.planning.authorityGate,
+            osm: cold.osm
+          };
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Cold Alton planning profile\n\n\`\`\`json\n${JSON.stringify(profile, null, 2)}\n\`\`\`\n`);
+          console.log(JSON.stringify(profile));
+          NODE
+      - name: Preserve cold planning result
+        uses: actions/upload-artifact@v4
+        with:
+          name: alton-planning-benchmark-cold
+          path: |
+            benchmark-output/cold/planning-pass-report.json
+            benchmark-output/cold/planning-authority.geojson
+          if-no-files-found: error
+          retention-days: 7
       - name: Warm planning pass
         run: npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/warm --cache .alton-benchmark-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
       - name: Publish benchmark summary
