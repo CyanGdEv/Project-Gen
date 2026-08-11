@@ -170,8 +170,11 @@ export function evaluatePlanningAuthority(candidate, context = {}) {
     minOverlap: Number(context.minOverlap ?? DEFAULT_PLANNING_AUTHORITY_GATE.minOverlap),
     maxOffsetM: Number(context.maxOffsetM ?? DEFAULT_PLANNING_AUTHORITY_GATE.maxOffsetM)
   };
-  const applicationStatus = normalizePlanningApplicationStatus(context.applicationStatus);
-  const statusEligible = context.enforceApplicationStatus === false
+  const statusProvided = context.applicationStatus !== null
+    && context.applicationStatus !== undefined
+    && String(context.applicationStatus).trim() !== "";
+  const applicationStatus = statusProvided ? normalizePlanningApplicationStatus(context.applicationStatus) : null;
+  const statusEligible = context.enforceApplicationStatus === false || !statusProvided
     ? true
     : planningApplicationWorldAuthorityEligible(applicationStatus);
   const confidence = finite(candidate?.confidence) ?? 0;
