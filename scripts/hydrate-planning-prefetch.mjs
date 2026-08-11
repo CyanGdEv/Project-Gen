@@ -3,12 +3,23 @@ import process from "node:process";
 import { hydratePlanningPrefetch } from "../src/planning/prefetch-hydrate.mjs";
 
 function parseArgs(argv) {
-  const options = { planningDirectory: null, concurrency: 4, timeoutMs: 45000, allowLegacyHttpTransport: false };
+  const options = {
+    planningDirectory: null,
+    concurrency: 4,
+    timeoutMs: 45000,
+    attemptTimeoutMs: 20000,
+    retries: 3,
+    retryDelayMs: 1000,
+    allowLegacyHttpTransport: false
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
     if (name === "--planning-dir") options.planningDirectory = argv[++index];
     else if (name === "--concurrency") options.concurrency = Number(argv[++index]);
     else if (name === "--timeout-ms") options.timeoutMs = Number(argv[++index]);
+    else if (name === "--attempt-timeout-ms") options.attemptTimeoutMs = Number(argv[++index]);
+    else if (name === "--retries") options.retries = Number(argv[++index]);
+    else if (name === "--retry-delay-ms") options.retryDelayMs = Number(argv[++index]);
     else if (name === "--allow-legacy-http") options.allowLegacyHttpTransport = true;
     else throw new Error(`Unknown option ${name}`);
   }
