@@ -1,0 +1,55 @@
+name: Alton Ride Attachment Discovery
+
+on:
+  pull_request:
+    paths:
+      - "src/planning/application-attachments.mjs"
+      - "scripts/discover-planning-attachments.mjs"
+      - "test/planning-application-attachments.test.mjs"
+      - ".github/workflows/alton-ride-attachment-discovery.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Discover SMD 2016 0315 attachments
+        run: |
+          mkdir -p benchmark-output/ride-discovery
+          npm run planning:discover -- \
+            --application-url "https://publicaccess.staffsmoorlands.gov.uk/portal/servlets/ApplicationSearchServlet?PKID=104356" \
+            --allow-legacy-http \
+            --retries 3 \
+            --timeout-ms 45000 \
+            --output benchmark-output/ride-discovery/smd-2016-0315-attachments.json
+      - name: Publish discovery summary
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const d = JSON.parse(fs.readFileSync('benchmark-output/ride-discovery/smd-2016-0315-attachments.json'));
+          const summary = {
+            applicationUrl: d.applicationUrl,
+            fetchedUrl: d.fetchedUrl,
+            attachments: d.attachments.length,
+            drawingAttachments: d.drawingAttachments.length,
+            proposedDrawingAttachments: d.proposedDrawingAttachments.length,
+            rideLayoutAttachments: d.rideLayoutAttachments.length,
+            top: d.attachments.slice(0, 20).map(x => ({ imageName: x.imageName, title: x.title, rowText: x.rowText, classification: x.classification, priority: x.priority, narrative: x.narrative, proposed: x.proposed, existing: x.existing, rideLayout: x.rideLayout }))
+          };
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## SMD/2016/0315 attachment discovery\n\n\`\`\`json\n${JSON.stringify(summary, null, 2)}\n\`\`\`\n`);
+          console.log(JSON.stringify(summary));
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smd-2016-0315-attachment-discovery
+          path: benchmark-output/ride-discovery/smd-2016-0315-attachments.json
+          if-no-files-found: error
+          retention-days: 7
