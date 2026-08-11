@@ -7,8 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check src/authority.mjs && node --check src/cache.mjs && node --check src/task-graph.mjs && node --check src/budget.mjs && node --check src/source-catalog.mjs && node --check src/source-runtime.mjs && node --check src/sources/planning-prefetch.mjs && node --check src/sources/http-json.mjs && node --check src/sources/osm-overpass.mjs && node --check src/planning/georeference.mjs && node --check src/planning/cache-keys.mjs && node --check src/planning/vectorize.mjs && node --check src/planning/semantics.mjs && node --check src/planning/fast-path.mjs && node --check src/planning/native-workers.mjs && node --check src/planning/strong-georeference.mjs && node --check src/planning/reference-raster.mjs && node --check src/planning/prefetch-runner.mjs",
+    "check": "node --check src/authority.mjs && node --check src/cache.mjs && node --check src/task-graph.mjs && node --check src/budget.mjs && node --check src/source-catalog.mjs && node --check src/source-runtime.mjs && node --check src/sources/planning-prefetch.mjs && node --check src/sources/http-json.mjs && node --check src/sources/osm-overpass.mjs && node --check src/planning/georeference.mjs && node --check src/planning/cache-keys.mjs && node --check src/planning/vectorize.mjs && node --check src/planning/semantics.mjs && node --check src/planning/fast-path.mjs && node --check src/planning/native-workers.mjs && node --check src/planning/strong-georeference.mjs && node --check src/planning/reference-raster.mjs && node --check src/planning/prefetch-runner.mjs && node --check scripts/run-planning-pass.mjs",
     "worker:self-test": "python3 src/planning/planning_auto_register.py self-test",
+    "planning:run": "node scripts/run-planning-pass.mjs",
     "test": "node --test"
   }
 }
