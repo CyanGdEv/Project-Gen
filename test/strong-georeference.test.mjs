@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseCoordinatePair, printedCoordinateControls, resolveStrongGeoreference } from "../src/planning/strong-georeference.mjs";
+import { parseCoordinatePair, printedCoordinateControls, resolveStrongGeoreference, validateControls } from "../src/planning/strong-georeference.mjs";
 
 test("embedded geospatial metadata wins before explicit controls", async () => {
   let calls = 0;
@@ -52,4 +52,15 @@ test("printed WGS84 coordinate pairs create direct controls", async () => {
   const points = await printedCoordinateControls(semantics, [52.97, -1.90, 53.00, -1.85], async () => { throw new Error("not needed"); });
   assert.equal(points.length, 3);
   assert.deepEqual(parseCoordinatePair("E 403000 N 344000"), { type: "osgb", first: 403000, second: 344000 });
+});
+
+test("null or blank control values are rejected instead of becoming zero coordinates", () => {
+  const result = validateControls([
+    { x: null, y: 0, longitude: null, latitude: null },
+    { x: 100, y: 0, longitude: -1.87, latitude: 52.99 },
+    { x: 0, y: 100, longitude: -1.88, latitude: 52.98 }
+  ], [52.97, -1.90, 53.00, -1.85]);
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "insufficient-control-points");
+  assert.equal(result.points.length, 2);
 });
