@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { automaticConsensusGroups, registrationVariantScore } from "./georeference.mjs";
-import { planningRegistrationKey, planningRenderKey, planningSemanticKey, planningVectorKey } from "./cache-keys.mjs";
+import { planningRegistrationKey, planningRenderKey, planningSemanticKey, planningStrongGeoreferenceKey, planningVectorKey } from "./cache-keys.mjs";
 import { normalizePlanningVectors } from "./vectorize.mjs";
 
 function hashJson(value) {
@@ -65,7 +65,51 @@ function bestPageCandidate(pages) {
     })[0] || null;
 }
 
-export async function runPlanningFastPath({ documents, cache, processors, referenceHash, bbox = null, options = {} }) {
+async function resolvePageRegistration({ cache, processors, document, page, render, semantics, semanticHash, referenceHash, bbox, options, metrics }) {
+  if (typeof processors.resolveStrongGeoreference === "function") {
+    const strongKey = planningStrongGeoreferenceKey({
+      documentSha256: document.sha256,
+      page,
+      pageSha256: render.sha256,
+      semanticHash,
+      version: options.strongGeoreferenceVersion || "strong-georef-v1"
+    });
+    const strong = await cachedStage(cache, strongKey, async () => ({
+      resolved: true,
+      value: await processors.resolveStrongGeoreference({ document, page, render, semantics, bbox })
+    }));
+    if (strong.cacheHit) metrics.strongGeoreferenceHits += 1;
+    if (strong.value?.value) return { value: strong.value.value, cacheHit: strong.cacheHit, source: "strong" };
+  }
+
+  let visualReferenceHash = referenceHash || null;
+  let visualContext = null;
+  if (typeof processors.getVisualRegistrationContext === "function") {
+    visualContext = await processors.getVisualRegistrationContext();
+    visualReferenceHash = visualContext?.referenceHash || visualReferenceHash;
+  }
+  if (!visualReferenceHash) throw new Error(`visual registration reference hash missing for ${document.id || document.sha256} page ${page}`);
+
+  const registration = await cache.getOrCreate(planningRegistrationKey({
+    pageSha256: render.sha256,
+    referenceHash: visualReferenceHash,
+    registrationVersion: options.registrationVersion || "registration-v1",
+    bbox,
+    locationPrior: document.locationPrior || null
+  }), () => processors.registerPage({
+    document,
+    page,
+    render,
+    semantics,
+    referenceHash: visualReferenceHash,
+    referenceImagePath: visualContext?.referenceImagePath || null,
+    bbox
+  }));
+  if (registration.cacheHit) metrics.registrationHits += 1;
+  return { ...registration, source: "visual" };
+}
+
+export async function runPlanningFastPath({ documents, cache, processors, referenceHash = null, bbox = null, options = {} }) {
   if (!cache) throw new Error("planning fast path requires cache");
   for (const name of ["renderPage", "extractSemantics", "registerPage", "vectorizePage"]) {
     if (typeof processors?.[name] !== "function") throw new Error(`planning fast path requires processors.${name}()`);
@@ -74,6 +118,7 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
   const metrics = {
     renderHits: 0,
     semanticHits: 0,
+    strongGeoreferenceHits: 0,
     registrationHits: 0,
     vectorHits: 0,
     documents: documents.length,
@@ -103,14 +148,19 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       if (semantics.cacheHit) metrics.semanticHits += 1;
       const semanticHash = semantics.value?.sha256 || hashJson(semantics.value);
 
-      const registration = await cache.getOrCreate(planningRegistrationKey({
-        pageSha256: render.value.sha256,
+      const registration = await resolvePageRegistration({
+        cache,
+        processors,
+        document,
+        page,
+        render: render.value,
+        semantics: semantics.value,
+        semanticHash,
         referenceHash,
-        registrationVersion: options.registrationVersion || "registration-v1",
         bbox,
-        locationPrior: document.locationPrior || null
-      }), () => processors.registerPage({ document, page, render: render.value, semantics: semantics.value, referenceHash, bbox }));
-      if (registration.cacheHit) metrics.registrationHits += 1;
+        options,
+        metrics
+      });
       pageResults.push({ page, render: render.value, semantics: semantics.value, semanticHash, registration: registration.value, candidate: candidateForPage(registration.value, page) });
     }
     const best = bestPageCandidate(pageResults);
