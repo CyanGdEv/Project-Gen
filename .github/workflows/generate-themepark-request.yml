@@ -1,0 +1,163 @@
+name: Generate Themepark Request
+
+on:
+  pull_request:
+    paths:
+      - ".github/generation-request.json"
+      - ".github/workflows/generate-themepark-request.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/generation-request.json"
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: project-gen-generation-request-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-request:
+    name: Validate generation request
+    runs-on: ubuntu-24.04
+    outputs:
+      request_id: ${{ steps.request.outputs.request_id }}
+      preset: ${{ steps.request.outputs.preset }}
+      accuracy: ${{ steps.request.outputs.accuracy }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: request
+        name: Validate request contract
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const request = JSON.parse(fs.readFileSync('.github/generation-request.json', 'utf8'));
+          const presets = new Set(['alton-towers', 'chessington', 'thorpe-park']);
+          const accuracies = new Set(['benchmark', 'verified']);
+          if (request.schemaVersion !== 1) throw new Error('generation request schemaVersion must be 1');
+          if (!request.requestId || typeof request.requestId !== 'string') throw new Error('generation request requestId is required');
+          if (!presets.has(request.preset)) throw new Error(`unsupported preset ${request.preset}`);
+          if (!accuracies.has(request.accuracy)) throw new Error(`unsupported accuracy ${request.accuracy}`);
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `request_id=${request.requestId}\n`);
+          fs.appendFileSync(out, `preset=${request.preset}\n`);
+          fs.appendFileSync(out, `accuracy=${request.accuracy}\n`);
+          console.log(JSON.stringify(request));
+          NODE
+
+  dispatch:
+    name: Dispatch and observe Generate Themepark
+    if: ${{ github.event_name == 'push' }}
+    needs: validate-request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REQUEST_ID: ${{ needs.validate-request.outputs.request_id }}
+      PRESET: ${{ needs.validate-request.outputs.preset }}
+      ACCURACY: ${{ needs.validate-request.outputs.accuracy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Dispatch Generate Themepark workflow
+        id: dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow generate-themepark.yml --event workflow_dispatch --branch main --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run generate-themepark.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f preset="$PRESET" \
+            -f accuracy="$ACCURACY"
+
+          run_id=""
+          for attempt in $(seq 1 60); do
+            candidate="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow generate-themepark.yml --event workflow_dispatch --branch main --limit 10 --json databaseId,createdAt --jq --arg started "$started" --argjson before "${before:-0}" '[.[] | select(.databaseId != $before and .createdAt >= $started)] | sort_by(.createdAt) | last | .databaseId // empty')"
+            if [[ -n "$candidate" ]]; then
+              run_id="$candidate"
+              break
+            fi
+            sleep 2
+          done
+          if [[ -z "$run_id" ]]; then
+            echo 'Unable to identify dispatched Generate Themepark run' >&2
+            exit 1
+          fi
+          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+          printf 'Dispatched Generate Themepark run %s\n' "$run_id"
+
+      - name: Wait for generated world run
+        id: wait
+        shell: bash
+        env:
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          set +e
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status
+          watch_code=$?
+          set -e
+          run_json="$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,status,conclusion,url,displayTitle,createdAt,updatedAt)"
+          printf '%s\n' "$run_json" > "$RUNNER_TEMP/run-result.json"
+          conclusion="$(node -e 'const r=require(process.argv[1]); process.stdout.write(String(r.conclusion||"unknown"))' "$RUNNER_TEMP/run-result.json")"
+          printf 'conclusion=%s\n' "$conclusion" >> "$GITHUB_OUTPUT"
+          printf 'watch_code=%s\n' "$watch_code" >> "$GITHUB_OUTPUT"
+
+      - name: Capture generated release and diagnostics metadata
+        if: always()
+        shell: bash
+        env:
+          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const cp = require('child_process');
+          const path = require('path');
+          const runPath = process.env.RUNNER_TEMP + '/run-result.json';
+          let run = {};
+          if (fs.existsSync(runPath)) run = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+          let release = null;
+          try {
+            const raw = cp.execFileSync('gh', ['release', 'view', `generated-world-${process.env.PRESET}-latest`, '--repo', process.env.GITHUB_REPOSITORY, '--json', 'tagName,url,assets'], { encoding: 'utf8' });
+            release = JSON.parse(raw);
+          } catch {}
+          const assets = Array.isArray(release?.assets) ? release.assets.map(a => ({ name: a.name, url: a.url, size: a.size })) : [];
+          const result = {
+            schemaVersion: 1,
+            requestId: process.env.REQUEST_ID,
+            preset: process.env.PRESET,
+            accuracy: process.env.ACCURACY,
+            observedAt: new Date().toISOString(),
+            run,
+            release: release ? { tagName: release.tagName, url: release.url, assets } : null
+          };
+          fs.writeFileSync('.github/generation-result.json', JSON.stringify(result, null, 2) + '\n');
+          console.log(JSON.stringify(result));
+          NODE
+
+      - name: Record generation result on main
+        if: always()
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/generation-result.json
+          if git diff --cached --quiet; then
+            echo 'Generation result unchanged'
+          else
+            git commit -m "Record Generate Themepark result for ${REQUEST_ID}"
+            git push origin HEAD:main
+          fi
+
+      - name: Fail request if generation failed
+        if: ${{ steps.wait.outputs.conclusion != 'success' }}
+        shell: bash
+        run: |
+          echo "Generate Themepark concluded with ${{ steps.wait.outputs.conclusion }}" >&2
+          exit 1
