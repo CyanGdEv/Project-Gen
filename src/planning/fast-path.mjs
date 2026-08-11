@@ -21,6 +21,14 @@ async function mapConcurrent(items, concurrency, worker) {
   return output;
 }
 
+async function cachedStage(cache, key, producer, validator = null) {
+  const existing = await cache.get(key);
+  if (existing !== null && (!validator || await validator(existing))) return { value: existing, cacheHit: true };
+  const value = await producer();
+  await cache.put(key, value);
+  return { value, cacheHit: false };
+}
+
 function candidateForPage(registration, page) {
   if (!registration || !["accepted", "candidate"].includes(registration.status)) return null;
   return {
@@ -33,7 +41,15 @@ function candidateForPage(registration, page) {
     confidence: Number(registration.confidence || 0),
     candidateLocation: registration.candidateLocation || null,
     quality: registration.quality || null,
-    alternatives: (Array.isArray(registration.alternatives) ? registration.alternatives : []).slice(0, 12)
+    matrix: registration.matrix || null,
+    cropOrigin: registration.cropOrigin || null,
+    sourceImageWidth: Number(registration.sourceImageWidth || 0) || null,
+    sourceImageHeight: Number(registration.sourceImageHeight || 0) || null,
+    alternatives: (Array.isArray(registration.alternatives) ? registration.alternatives : []).slice(0, 12).map((candidate, index) => ({
+      ...candidate,
+      page,
+      alternativeRank: Number(candidate?.alternativeRank ?? index + 1)
+    }))
   };
 }
 
@@ -56,12 +72,12 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     const pageResults = [];
     for (const page of pages) {
       metrics.pages += 1;
-      const render = await cache.getOrCreate(planningRenderKey({
+      const render = await cachedStage(cache, planningRenderKey({
         documentSha256: document.sha256,
         page,
         dpi: options.dpi || 240,
         rendererVersion: options.rendererVersion || "render-v1"
-      }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }));
+      }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }), processors.validateRenderArtifact || null);
       if (render.cacheHit) metrics.renderHits += 1;
       if (!render.value?.sha256) throw new Error(`renderPage must return sha256 for ${document.id || document.sha256} page ${page}`);
 
@@ -113,7 +129,8 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       page: selectedPage.page,
       render: selectedPage.render,
       semantics: selectedPage.semantics,
-      candidate: selectedCandidate
+      candidate: selectedCandidate,
+      bbox
     }));
     if (vector.cacheHit) metrics.vectorHits += 1;
     const normalized = normalizePlanningVectors(vector.value?.vectors || vector.value || [], {
