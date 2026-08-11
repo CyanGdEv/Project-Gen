@@ -4,6 +4,7 @@ import { FileArtifactCache } from "../cache.mjs";
 import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
+import { createPdfTextSemanticExtractor } from "./pdf-text-semantics.mjs";
 import { createPlanningProcessorProfiler, createTimingAccumulator } from "./profiler.mjs";
 import { buildPlanningReference } from "./reference-raster.mjs";
 import { resolveStrongGeoreference } from "./strong-georeference.mjs";
@@ -122,6 +123,13 @@ export async function preparePrefetchDocuments(planningDirectory, ingestion, opt
 
 export function createPriorityPlanningProcessors(options = {}) {
   const baseNative = options.nativeProcessors || createNativePlanningProcessors({ ...options, referenceImagePath: null });
+  const embeddedTextSemantics = createPdfTextSemanticExtractor({
+    runTool: options.runTool || runTool,
+    pdftotext: options.pdftotext,
+    timeoutMs: options.pdfTextTimeoutMs || 6000,
+    minCharacters: options.pdfTextMinCharacters || 24,
+    failOnPdfTextError: options.failOnPdfTextError
+  });
   let visualNative = null;
   let visualContext = null;
 
@@ -150,6 +158,9 @@ export function createPriorityPlanningProcessors(options = {}) {
 
   return {
     ...baseNative,
+    async extractSemantics(args) {
+      return embeddedTextSemantics(args, () => baseNative.extractSemantics(args));
+    },
     async resolveStrongGeoreference(args) {
       return resolveStrongGeoreference(args, {
         runTool: options.runTool || runTool,
@@ -234,7 +245,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       concurrency: options.concurrency || 4,
       dpi: options.dpi || 240,
       rendererVersion: options.rendererVersion || "render-v2-adaptive-gray",
-      extractorVersion: options.extractorVersion || "semantic-v2-lines",
+      extractorVersion: options.extractorVersion || "semantic-v3-pdf-text-bbox",
       strongGeoreferenceVersion: options.strongGeoreferenceVersion || "strong-georef-v1",
       registrationVersion: options.registrationVersion || "registration-v2-priority",
       vectorizerVersion: options.vectorizerVersion || "vector-v1",
