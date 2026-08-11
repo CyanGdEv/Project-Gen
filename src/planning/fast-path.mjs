@@ -72,6 +72,7 @@ async function resolvePageRegistration({ cache, processors, document, page, rend
       page,
       pageSha256: render.sha256,
       semanticHash,
+      bbox,
       version: options.strongGeoreferenceVersion || "strong-georef-v1"
     });
     const strong = await cachedStage(cache, strongKey, async () => ({
