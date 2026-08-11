@@ -7,24 +7,6 @@ function hashJson(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function nowMs() {
-  return Number(process.hrtime.bigint() / 1000000n);
-}
-
-function addStageWork(metrics, stage, elapsedMs) {
-  metrics.stageWorkMs[stage] = Number(metrics.stageWorkMs[stage] || 0) + Math.max(0, Number(elapsedMs || 0));
-  metrics.stageCalls[stage] = Number(metrics.stageCalls[stage] || 0) + 1;
-}
-
-async function measuredStage(metrics, stage, worker) {
-  const started = nowMs();
-  try {
-    return await worker();
-  } finally {
-    addStageWork(metrics, stage, nowMs() - started);
-  }
-}
-
 async function mapConcurrent(items, concurrency, worker) {
   const output = new Array(items.length);
   let next = 0;
@@ -106,10 +88,10 @@ async function resolvePageRegistration({ cache, processors, document, page, rend
       bbox,
       version: options.strongGeoreferenceVersion || "strong-georef-v1"
     });
-    const strong = await measuredStage(metrics, "strongGeoreference", () => cachedStage(cache, strongKey, async () => ({
+    const strong = await cachedStage(cache, strongKey, async () => ({
       resolved: true,
       value: await processors.resolveStrongGeoreference({ document, page, render, semantics, bbox })
-    })));
+    }));
     if (strong.cacheHit) metrics.strongGeoreferenceHits += 1;
     if (strong.value?.value) return { value: strong.value.value, cacheHit: strong.cacheHit, source: "strong" };
   }
@@ -117,12 +99,12 @@ async function resolvePageRegistration({ cache, processors, document, page, rend
   let visualReferenceHash = referenceHash || null;
   let visualContext = null;
   if (typeof processors.getVisualRegistrationContext === "function") {
-    visualContext = await measuredStage(metrics, "visualReference", () => processors.getVisualRegistrationContext());
+    visualContext = await processors.getVisualRegistrationContext();
     visualReferenceHash = visualContext?.referenceHash || visualReferenceHash;
   }
   if (!visualReferenceHash) throw new Error(`visual registration reference hash missing for ${document.id || document.sha256} page ${page}`);
 
-  const registration = await measuredStage(metrics, "visualRegistration", () => cache.getOrCreate(planningRegistrationKey({
+  const registration = await cache.getOrCreate(planningRegistrationKey({
     pageSha256: render.sha256,
     referenceHash: visualReferenceHash,
     registrationVersion: options.registrationVersion || "registration-v1",
@@ -136,7 +118,7 @@ async function resolvePageRegistration({ cache, processors, document, page, rend
     referenceHash: visualReferenceHash,
     referenceImagePath: visualContext?.referenceImagePath || null,
     bbox
-  })));
+  }));
   if (registration.cacheHit) metrics.registrationHits += 1;
   return { ...registration, source: "visual" };
 }
@@ -160,23 +142,7 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     pageFailureCodes: {},
     vectorFailures: 0,
     directGeoreferences: 0,
-    consensusGeoreferences: 0,
-    stageWorkMs: {
-      render: 0,
-      semantics: 0,
-      strongGeoreference: 0,
-      visualReference: 0,
-      visualRegistration: 0,
-      vectorize: 0
-    },
-    stageCalls: {
-      render: 0,
-      semantics: 0,
-      strongGeoreference: 0,
-      visualReference: 0,
-      visualRegistration: 0,
-      vectorize: 0
-    }
+    consensusGeoreferences: 0
   };
 
   const prepared = await mapConcurrent(documents, concurrency, async (document) => {
@@ -186,20 +152,20 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       metrics.pages += 1;
       let stage = "render";
       try {
-        const render = await measuredStage(metrics, "render", () => cachedStage(cache, planningRenderKey({
+        const render = await cachedStage(cache, planningRenderKey({
           documentSha256: document.sha256,
           page,
           dpi: options.dpi || 240,
           rendererVersion: options.rendererVersion || "render-v1"
-        }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }), processors.validateRenderArtifact || null));
+        }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }), processors.validateRenderArtifact || null);
         if (render.cacheHit) metrics.renderHits += 1;
         if (!render.value?.sha256) throw new Error(`renderPage must return sha256 for ${document.id || document.sha256} page ${page}`);
 
         stage = "semantics";
-        const semantics = await measuredStage(metrics, "semantics", () => cache.getOrCreate(planningSemanticKey({
+        const semantics = await cache.getOrCreate(planningSemanticKey({
           pageSha256: render.value.sha256,
           extractorVersion: options.extractorVersion || "semantic-v1"
-        }), () => processors.extractSemantics({ document, page, render: render.value })));
+        }), () => processors.extractSemantics({ document, page, render: render.value }));
         if (semantics.cacheHit) metrics.semanticHits += 1;
         const semanticHash = semantics.value?.sha256 || hashJson(semantics.value);
 
@@ -272,7 +238,7 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     if (!selectedPage) throw new Error(`selected georeference missing page for ${entry.id}`);
     try {
       const transformHash = hashJson(selectedCandidate);
-      const vector = await measuredStage(metrics, "vectorize", () => cache.getOrCreate(planningVectorKey({
+      const vector = await cache.getOrCreate(planningVectorKey({
         pageSha256: selectedPage.render.sha256,
         semanticHash: selectedPage.semanticHash,
         transformHash,
@@ -284,7 +250,7 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
         semantics: selectedPage.semantics,
         candidate: selectedCandidate,
         bbox
-      })));
+      }));
       if (vector.cacheHit) metrics.vectorHits += 1;
       const normalized = normalizePlanningVectors(vector.value?.vectors || vector.value || [], {
         applicationReference: entry.applicationReference,
