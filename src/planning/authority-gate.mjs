@@ -1,3 +1,8 @@
+import {
+  normalizePlanningApplicationStatus,
+  planningApplicationWorldAuthorityEligible
+} from "./authority-status.mjs";
+
 const EARTH_RADIUS_M = 6371008.8;
 
 export const DEFAULT_PLANNING_AUTHORITY_GATE = Object.freeze({
@@ -165,6 +170,10 @@ export function evaluatePlanningAuthority(candidate, context = {}) {
     minOverlap: Number(context.minOverlap ?? DEFAULT_PLANNING_AUTHORITY_GATE.minOverlap),
     maxOffsetM: Number(context.maxOffsetM ?? DEFAULT_PLANNING_AUTHORITY_GATE.maxOffsetM)
   };
+  const applicationStatus = normalizePlanningApplicationStatus(context.applicationStatus);
+  const statusEligible = context.enforceApplicationStatus === false
+    ? true
+    : planningApplicationWorldAuthorityEligible(applicationStatus);
   const confidence = finite(candidate?.confidence) ?? 0;
   const overlap = planningGeofenceOverlap(candidate, context.bbox);
   const directAuthority = Boolean(candidate?.directAuthority);
@@ -172,6 +181,7 @@ export function evaluatePlanningAuthority(candidate, context = {}) {
   const derivedOffset = reportedOffset ?? haversineM(candidate?.candidateLocation, context.locationPrior);
   const reasons = [];
 
+  if (!statusEligible) reasons.push("application-status-not-world-authority-eligible");
   if (confidence < thresholds.minConfidence) reasons.push("confidence-below-authority-gate");
   if (overlap === null) reasons.push("build-geofence-overlap-unavailable");
   else if (overlap < thresholds.minOverlap) reasons.push("build-geofence-overlap-below-authority-gate");
@@ -186,6 +196,8 @@ export function evaluatePlanningAuthority(candidate, context = {}) {
   return {
     accepted: reasons.length === 0,
     mode: directAuthority ? "strong-georeference" : "visual-registration",
+    applicationStatus,
+    applicationStatusEligible: statusEligible,
     confidence,
     overlap,
     offsetM: derivedOffset,
