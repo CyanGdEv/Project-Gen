@@ -19,6 +19,7 @@ function parseArgs(argv) {
     bbox: null,
     outputDirectory: "project-gen-planning-output",
     cacheRoot: ".project-gen-cache",
+    sourceCacheRoot: process.env.PROJECT_GEN_SOURCE_CACHE || null,
     overpass: process.env.PROJECT_GEN_OVERPASS_URL || DEFAULT_OVERPASS,
     overpassFallbacks: envList(process.env.PROJECT_GEN_OVERPASS_FALLBACK_URLS || DEFAULT_OVERPASS_FALLBACK),
     maxProcessingDocuments: 500,
@@ -32,6 +33,7 @@ function parseArgs(argv) {
     else if (name === "--bbox") options.bbox = argv[++index].split(",").map(Number);
     else if (name === "--output") options.outputDirectory = argv[++index];
     else if (name === "--cache") options.cacheRoot = argv[++index];
+    else if (name === "--source-cache") options.sourceCacheRoot = argv[++index];
     else if (name === "--overpass") options.overpass = argv[++index];
     else if (name === "--overpass-fallback") options.overpassFallbacks.push(argv[++index]);
     else if (name === "--no-overpass-fallback") options.overpassFallbacks = [];
@@ -45,6 +47,7 @@ function parseArgs(argv) {
   if (!Array.isArray(options.bbox) || options.bbox.length !== 4 || options.bbox.some((value) => !Number.isFinite(value))) {
     throw new Error("--bbox must be south,west,north,east");
   }
+  if (!options.sourceCacheRoot) options.sourceCacheRoot = `${options.cacheRoot}-sources`;
   return options;
 }
 
@@ -52,24 +55,46 @@ function nowMs() {
   return Number(process.hrtime.bigint() / 1000000n);
 }
 
+function unavailableOsmSource(error) {
+  return {
+    source: "osm",
+    status: "unavailable",
+    cacheHit: false,
+    cacheMode: "unavailable",
+    payload: null,
+    provenance: {
+      endpoint: null,
+      endpointAttempt: 0,
+      attemptedEndpoints: Array.isArray(error?.failures) ? error.failures.map((failure) => failure.endpoint) : [],
+      unavailableReason: error?.message || String(error)
+    }
+  };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const startedAt = nowMs();
   const cache = new FileArtifactCache(path.join(path.resolve(options.cacheRoot), "metadata"));
+  const sourceCache = new FileArtifactCache(path.join(path.resolve(options.sourceCacheRoot), "metadata"));
 
   const osmStarted = nowMs();
   const osm = createOsmOverpassAdapter({
     endpoint: options.overpass,
     fallbackEndpoints: options.overpassFallbacks,
-    cache,
+    cache: sourceCache,
     freshForMs: 6 * 60 * 60 * 1000
   });
-  const osmSource = await osm.acquire({
-    request: { bbox: options.bbox },
-    cache,
-    elapsedMs: 0,
-    deadlineMs: 65000
-  });
+  let osmSource;
+  try {
+    osmSource = await osm.acquire({
+      request: { bbox: options.bbox },
+      cache: sourceCache,
+      elapsedMs: 0,
+      deadlineMs: 65000
+    });
+  } catch (error) {
+    osmSource = unavailableOsmSource(error);
+  }
   const osmMs = nowMs() - osmStarted;
 
   const planningStarted = nowMs();
@@ -119,12 +144,15 @@ async function main() {
       reference: result.reference
     },
     osm: {
+      status: osmSource.status,
       cacheHit: osmSource.cacheHit,
       cacheMode: osmSource.cacheMode,
       endpoint: osmSource.provenance?.endpoint || osmSource.provenance?.url || null,
-      endpointAttempt: osmSource.provenance?.endpointAttempt || 1,
+      endpointAttempt: osmSource.provenance?.endpointAttempt || 0,
       attemptedEndpoints: osmSource.provenance?.attemptedEndpoints || [],
       contentSha256: osmSource.provenance?.contentSha256 || null,
+      unavailableReason: osmSource.provenance?.unavailableReason || null,
+      staleAgeMs: osmSource.provenance?.staleAgeMs ?? null,
       role: "registration-context-only-never-rendered"
     }
   };
@@ -138,6 +166,8 @@ async function main() {
     candidates: report.planning.candidateAcceptedDocuments,
     accepted: report.planning.acceptedDocuments,
     features: report.planning.features,
+    osmStatus: report.osm.status,
+    osmCacheMode: report.osm.cacheMode,
     totalMs,
     withinFiveMinuteTarget: report.withinFiveMinuteTarget,
     output
