@@ -70,11 +70,17 @@ async function documentPages(document, options = {}) {
 async function mapConcurrent(items, concurrency, worker) {
   const output = new Array(items.length);
   let next = 0;
+  let stopped = false;
   async function lane() {
-    while (true) {
+    while (!stopped) {
       const index = next++;
       if (index >= items.length) return;
-      output[index] = await worker(items[index], index);
+      try {
+        output[index] = await worker(items[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(items.length || 1, Math.max(1, concurrency)) }, lane));
@@ -224,14 +230,15 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     options: {
       concurrency: options.concurrency || 4,
       dpi: options.dpi || 240,
-      rendererVersion: options.rendererVersion || "render-v1",
+      rendererVersion: options.rendererVersion || "render-v2-adaptive-gray",
       extractorVersion: options.extractorVersion || "semantic-v2-lines",
       strongGeoreferenceVersion: options.strongGeoreferenceVersion || "strong-georef-v1",
       registrationVersion: options.registrationVersion || "registration-v2-priority",
       vectorizerVersion: options.vectorizerVersion || "vector-v1",
       planningAutomaticRegistrationConsensusM: options.planningAutomaticRegistrationConsensusM,
       planningAutomaticRegistrationMinConfidence: options.planningAutomaticRegistrationMinConfidence,
-      planningAutomaticRegistrationConsensusDocuments: options.planningAutomaticRegistrationConsensusDocuments
+      planningAutomaticRegistrationConsensusDocuments: options.planningAutomaticRegistrationConsensusDocuments,
+      failOnRecoverablePageError: options.failOnRecoverablePageError
     }
   }));
   return {
