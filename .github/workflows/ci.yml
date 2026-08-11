@@ -33,6 +33,7 @@ jobs:
           python3 -m py_compile src/planning/planning_reference.py
           npm run worker:self-test
       - name: Run Node regression suite
+        id: node_tests
         run: |
           set +e
           npm test > /tmp/project-gen-node-test.log 2>&1
@@ -45,3 +46,11 @@ jobs:
             exit "$status"
           fi
           tail -n 40 /tmp/project-gen-node-test.log
+      - name: Upload Node regression log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-gen-node-regression-log
+          path: /tmp/project-gen-node-test.log
+          if-no-files-found: ignore
+          retention-days: 2
