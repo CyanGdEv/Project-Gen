@@ -1,0 +1,142 @@
+import { createHash } from "node:crypto";
+import { automaticConsensusGroups, registrationVariantScore } from "./georeference.mjs";
+import { planningRegistrationKey, planningRenderKey, planningSemanticKey, planningVectorKey } from "./cache-keys.mjs";
+import { normalizePlanningVectors } from "./vectorize.mjs";
+
+function hashJson(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+async function mapConcurrent(items, concurrency, worker) {
+  const output = new Array(items.length);
+  let next = 0;
+  async function run() {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      output[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) }, run));
+  return output;
+}
+
+function candidateForPage(registration, page) {
+  if (!registration || !["accepted", "candidate"].includes(registration.status)) return null;
+  return {
+    method: registration.status === "accepted" ? "automatic-linework-registration" : "automatic-linework-candidate",
+    page,
+    pageWidth: Number(registration.pageWidth || 0),
+    pageHeight: Number(registration.pageHeight || 0),
+    crs: String(registration.crs || "EPSG:4326"),
+    points: Array.isArray(registration.points) ? registration.points : [],
+    confidence: Number(registration.confidence || 0),
+    candidateLocation: registration.candidateLocation || null,
+    quality: registration.quality || null,
+    alternatives: (Array.isArray(registration.alternatives) ? registration.alternatives : []).slice(0, 12)
+  };
+}
+
+function bestPageCandidate(pages) {
+  return pages
+    .filter((page) => page.candidate)
+    .sort((a, b) => registrationVariantScore(b.candidate) - registrationVariantScore(a.candidate) || a.page - b.page)[0] || null;
+}
+
+export async function runPlanningFastPath({ documents, cache, processors, referenceHash, bbox = null, options = {} }) {
+  if (!cache) throw new Error("planning fast path requires cache");
+  for (const name of ["renderPage", "extractSemantics", "registerPage", "vectorizePage"]) {
+    if (typeof processors?.[name] !== "function") throw new Error(`planning fast path requires processors.${name}()`);
+  }
+  const concurrency = Math.max(1, Number(options.concurrency || 4));
+  const metrics = { renderHits: 0, semanticHits: 0, registrationHits: 0, vectorHits: 0, documents: documents.length, pages: 0 };
+
+  const prepared = await mapConcurrent(documents, concurrency, async (document) => {
+    const pages = Array.isArray(document.pages) && document.pages.length ? document.pages : [1];
+    const pageResults = [];
+    for (const page of pages) {
+      metrics.pages += 1;
+      const render = await cache.getOrCreate(planningRenderKey({
+        documentSha256: document.sha256,
+        page,
+        dpi: options.dpi || 240,
+        rendererVersion: options.rendererVersion || "render-v1"
+      }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }));
+      if (render.cacheHit) metrics.renderHits += 1;
+      if (!render.value?.sha256) throw new Error(`renderPage must return sha256 for ${document.id || document.sha256} page ${page}`);
+
+      const semantics = await cache.getOrCreate(planningSemanticKey({
+        pageSha256: render.value.sha256,
+        extractorVersion: options.extractorVersion || "semantic-v1"
+      }), () => processors.extractSemantics({ document, page, render: render.value }));
+      if (semantics.cacheHit) metrics.semanticHits += 1;
+      const semanticHash = semantics.value?.sha256 || hashJson(semantics.value);
+
+      const registration = await cache.getOrCreate(planningRegistrationKey({
+        pageSha256: render.value.sha256,
+        referenceHash,
+        registrationVersion: options.registrationVersion || "registration-v1",
+        bbox,
+        locationPrior: document.locationPrior || null
+      }), () => processors.registerPage({ document, page, render: render.value, semantics: semantics.value, referenceHash, bbox }));
+      if (registration.cacheHit) metrics.registrationHits += 1;
+      pageResults.push({ page, render: render.value, semantics: semantics.value, semanticHash, registration: registration.value, candidate: candidateForPage(registration.value, page) });
+    }
+    const best = bestPageCandidate(pageResults);
+    return {
+      id: document.id || document.sha256,
+      sourceSha256: document.sha256,
+      applicationReference: document.applicationReference || "unknown",
+      document,
+      pages: pageResults,
+      automaticCandidate: best?.candidate || null,
+      selectedPage: best?.page || null
+    };
+  });
+
+  const consensus = automaticConsensusGroups(prepared, options);
+  const acceptedDocuments = prepared.filter((entry) => consensus.accepted.has(entry.id));
+  const vectorized = await mapConcurrent(acceptedDocuments, concurrency, async (entry) => {
+    const selectedCandidate = consensus.selectedCandidates.get(entry.id);
+    const selectedPage = entry.pages.find((page) => page.page === Number(selectedCandidate?.page || entry.selectedPage))
+      || entry.pages.find((page) => page.candidate === selectedCandidate)
+      || entry.pages.find((page) => page.page === entry.selectedPage);
+    if (!selectedPage) throw new Error(`consensus selected missing page for ${entry.id}`);
+    const transformHash = hashJson(selectedCandidate);
+    const vector = await cache.getOrCreate(planningVectorKey({
+      pageSha256: selectedPage.render.sha256,
+      semanticHash: selectedPage.semanticHash,
+      transformHash,
+      vectorizerVersion: options.vectorizerVersion || "vector-v1"
+    }), () => processors.vectorizePage({
+      document: entry.document,
+      page: selectedPage.page,
+      render: selectedPage.render,
+      semantics: selectedPage.semantics,
+      candidate: selectedCandidate
+    }));
+    if (vector.cacheHit) metrics.vectorHits += 1;
+    const normalized = normalizePlanningVectors(vector.value?.vectors || vector.value || [], {
+      applicationReference: entry.applicationReference,
+      documentId: entry.id,
+      sourceSha256: entry.sourceSha256,
+      page: selectedPage.page,
+      confidence: selectedCandidate?.confidence
+    });
+    return { id: entry.id, page: selectedPage.page, candidate: selectedCandidate, ...normalized };
+  });
+
+  return {
+    documents: prepared,
+    consensus: {
+      acceptedIds: [...consensus.accepted].sort(),
+      evidence: consensus.evidence,
+      minimumDocuments: consensus.minimumDocuments,
+      minimumConfidence: consensus.minimumConfidence,
+      maxSeparationM: consensus.maxSeparationM
+    },
+    features: vectorized.flatMap((entry) => entry.features),
+    vectorized,
+    metrics
+  };
+}
