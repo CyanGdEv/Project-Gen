@@ -3,9 +3,15 @@ name: Alton Ride Attachment Discovery
 on:
   pull_request:
     paths:
+      - "package.json"
       - "src/planning/application-attachments.mjs"
+      - "src/planning/discovered-attachment-hydrate.mjs"
+      - "src/planning/ride-page-evidence.mjs"
       - "scripts/discover-planning-attachments.mjs"
+      - "scripts/hydrate-discovered-planning.mjs"
       - "test/planning-application-attachments.test.mjs"
+      - "test/discovered-attachment-hydrate.test.mjs"
+      - "test/ride-page-evidence.test.mjs"
       - ".github/workflows/alton-ride-attachment-discovery.yml"
   workflow_dispatch:
 
@@ -42,7 +48,7 @@ jobs:
             drawingAttachments: d.drawingAttachments.length,
             proposedDrawingAttachments: d.proposedDrawingAttachments.length,
             rideLayoutAttachments: d.rideLayoutAttachments.length,
-            top: d.attachments.slice(0, 20).map(x => ({ imageName: x.imageName, title: x.title, rowText: x.rowText, classification: x.classification, priority: x.priority, narrative: x.narrative, proposed: x.proposed, existing: x.existing, rideLayout: x.rideLayout }))
+            top: d.attachments.slice(0, 30).map(x => ({ imageName: x.imageName, title: x.title, rowText: x.rowText, classification: x.classification, priority: x.priority, narrative: x.narrative, proposed: x.proposed, existing: x.existing, rideLayout: x.rideLayout }))
           };
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## SMD/2016/0315 attachment discovery\n\n\`\`\`json\n${JSON.stringify(summary, null, 2)}\n\`\`\`\n`);
           console.log(JSON.stringify(summary));
