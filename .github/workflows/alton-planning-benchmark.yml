@@ -57,10 +57,23 @@ jobs:
         with:
           path: benchmark/alton-planning-subset/files
           key: alton-planning-docs-${{ runner.os }}-${{ github.run_id }}
+      - name: Restore resilient OSM reference cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .alton-source-cache
+          key: alton-osm-reference-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            alton-osm-reference-v1-${{ runner.os }}-
       - name: Cold planning pass
         run: |
           rm -rf .alton-benchmark-cache benchmark-output/cold benchmark-output/warm
-          npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/cold --cache .alton-benchmark-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
+          npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/cold --cache .alton-benchmark-cache --source-cache .alton-source-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
+      - name: Save resilient OSM reference cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .alton-source-cache
+          key: alton-osm-reference-v1-${{ runner.os }}-${{ github.run_id }}
       - name: Publish cold planning profile
         run: |
           node - <<'NODE'
@@ -90,7 +103,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Warm planning pass
-        run: npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/warm --cache .alton-benchmark-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
+        run: npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/warm --cache .alton-benchmark-cache --source-cache .alton-source-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
       - name: Publish benchmark summary
         run: |
           node - <<'NODE'
