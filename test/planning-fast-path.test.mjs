@@ -63,10 +63,11 @@ test("fast path reuses render, semantic, registration and vector stages on warm 
       { id: "a", sha256: "sha-a", applicationReference: "SMD/2017/0111", pages: [1] },
       { id: "b", sha256: "sha-b", applicationReference: "SMD/2017/0111", pages: [1] }
     ];
-    const first = await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref", bbox: [52.9, -1.9, 53, -1.8] });
+    const fastPathOptions = { enforceAuthorityGate: false };
+    const first = await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref", bbox: [52.9, -1.9, 53, -1.8], options: fastPathOptions });
     assert.equal(first.features.length, 2);
     assert.deepEqual(calls, { render: 2, semantic: 2, registration: 2, vector: 2 });
-    const second = await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref", bbox: [52.9, -1.9, 53, -1.8] });
+    const second = await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref", bbox: [52.9, -1.9, 53, -1.8], options: fastPathOptions });
     assert.equal(second.features.length, 2);
     assert.deepEqual(calls, { render: 2, semantic: 2, registration: 2, vector: 2 });
     assert.equal(second.metrics.renderHits, 2);
@@ -93,8 +94,9 @@ test("changing reference hash invalidates registration and vectorization but reu
       { id: "a", sha256: "sha-a", applicationReference: "x" },
       { id: "b", sha256: "sha-b", applicationReference: "x" }
     ];
-    await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref-1" });
-    await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref-2" });
+    const fastPathOptions = { enforceAuthorityGate: false };
+    await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref-1", options: fastPathOptions });
+    await runPlanningFastPath({ documents, cache, processors, referenceHash: "ref-2", options: fastPathOptions });
     assert.equal(calls.render, 2);
     assert.equal(calls.semantic, 2);
     assert.equal(calls.registration, 4);
