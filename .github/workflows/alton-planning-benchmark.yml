@@ -15,6 +15,7 @@ on:
       - "scripts/hydrate-planning-prefetch.mjs"
       - "scripts/run-planning-pass.mjs"
       - "benchmark/alton-planning-subset.mjs"
+      - "benchmark/normalize-alton-planning-corpus.mjs"
       - ".github/workflows/alton-planning-benchmark.yml"
   workflow_dispatch:
 
@@ -34,9 +35,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv gdal-bin
-      - name: Build pinned Alton planning manifest
+      - name: Build pinned geometry-first Alton planning manifest
         run: |
           node benchmark/alton-planning-subset.mjs benchmark/alton-planning-subset
+          node benchmark/normalize-alton-planning-corpus.mjs benchmark/alton-planning-subset
           mkdir -p benchmark/alton-planning-subset/files
       - name: Restore verified planning evidence from prior benchmark attempts
         uses: actions/cache/restore@v4
@@ -70,9 +72,11 @@ jobs:
             cold: cold.timings,
             warm: warm.timings,
             speedup: cold.timings.totalMs / Math.max(1, warm.timings.totalMs),
-            acceptedDocuments: { cold: cold.planning.acceptedDocuments, warm: warm.planning.acceptedDocuments },
+            candidateAcceptedDocuments: { cold: cold.planning.candidateAcceptedDocuments, warm: warm.planning.candidateAcceptedDocuments },
+            authorityAcceptedDocuments: { cold: cold.planning.acceptedDocuments, warm: warm.planning.acceptedDocuments },
             features: { cold: cold.planning.features, warm: warm.planning.features },
             cache: { cold: cold.planning.metrics, warm: warm.planning.metrics },
+            authorityGate: { cold: cold.planning.authorityGate, warm: warm.planning.authorityGate },
             osm: { cold: cold.osm, warm: warm.osm },
             withinFiveMinuteTarget: { cold: cold.withinFiveMinuteTarget, warm: warm.withinFiveMinuteTarget }
           };
