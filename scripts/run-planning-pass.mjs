@@ -6,13 +6,21 @@ import { FileArtifactCache } from "../src/cache.mjs";
 import { runPlanningPrefetchFastPath } from "../src/planning/prefetch-runner.mjs";
 import { createOsmOverpassAdapter } from "../src/sources/osm-overpass.mjs";
 
+const DEFAULT_OVERPASS = "https://overpass-api.de/api/interpreter";
+const DEFAULT_OVERPASS_FALLBACK = "https://overpass.private.coffee/api/interpreter";
+
+function envList(value) {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
 function parseArgs(argv) {
   const options = {
     planningDirectory: null,
     bbox: null,
     outputDirectory: "project-gen-planning-output",
     cacheRoot: ".project-gen-cache",
-    overpass: process.env.PROJECT_GEN_OVERPASS_URL || "https://overpass-api.de/api/interpreter",
+    overpass: process.env.PROJECT_GEN_OVERPASS_URL || DEFAULT_OVERPASS,
+    overpassFallbacks: envList(process.env.PROJECT_GEN_OVERPASS_FALLBACK_URLS || DEFAULT_OVERPASS_FALLBACK),
     maxProcessingDocuments: 500,
     maxPages: 12,
     concurrency: 4,
@@ -25,6 +33,8 @@ function parseArgs(argv) {
     else if (name === "--output") options.outputDirectory = argv[++index];
     else if (name === "--cache") options.cacheRoot = argv[++index];
     else if (name === "--overpass") options.overpass = argv[++index];
+    else if (name === "--overpass-fallback") options.overpassFallbacks.push(argv[++index]);
+    else if (name === "--no-overpass-fallback") options.overpassFallbacks = [];
     else if (name === "--max-documents") options.maxProcessingDocuments = Number(argv[++index]);
     else if (name === "--max-pages") options.maxPages = Number(argv[++index]);
     else if (name === "--concurrency") options.concurrency = Number(argv[++index]);
@@ -48,7 +58,12 @@ async function main() {
   const cache = new FileArtifactCache(path.join(path.resolve(options.cacheRoot), "metadata"));
 
   const osmStarted = nowMs();
-  const osm = createOsmOverpassAdapter({ endpoint: options.overpass, cache, freshForMs: 6 * 60 * 60 * 1000 });
+  const osm = createOsmOverpassAdapter({
+    endpoint: options.overpass,
+    fallbackEndpoints: options.overpassFallbacks,
+    cache,
+    freshForMs: 6 * 60 * 60 * 1000
+  });
   const osmSource = await osm.acquire({
     request: { bbox: options.bbox },
     cache,
@@ -102,6 +117,9 @@ async function main() {
     osm: {
       cacheHit: osmSource.cacheHit,
       cacheMode: osmSource.cacheMode,
+      endpoint: osmSource.provenance?.endpoint || osmSource.provenance?.url || null,
+      endpointAttempt: osmSource.provenance?.endpointAttempt || 1,
+      attemptedEndpoints: osmSource.provenance?.attemptedEndpoints || [],
       contentSha256: osmSource.provenance?.contentSha256 || null,
       role: "registration-context-and-gap-fill-only"
     }
