@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { contentKey } from "../cache.mjs";
 
-export const PLANNING_PREFETCH_INGEST_VERSION = 1;
+export const PLANNING_PREFETCH_INGEST_VERSION = 2;
 
 const DOCUMENT_MIMES = new Set([
   "application/pdf",
@@ -18,6 +18,7 @@ const GEOMETRY_TERMS = [
   ["block-plan", 125, /\bblock\s+plan\b/i],
   ["general-arrangement", 120, /\b(?:general\s+arrangement|g\.?a\.?\s+(?:plan|layout|drawing))\b/i],
   ["layout", 115, /\b(?:site|master|overall|proposed)\s+layout\b/i],
+  ["topographical-survey", 112, /\b(?:topographical|topographic|topo)\s+(?:survey|plan|drawing)\b/i],
   ["landscape", 110, /\b(?:landscape|landscaping|planting|hardscape|hard\s+landscaping)\b/i],
   ["elevation", 100, /\b(?:elevation|section|roof\s+plan)\b/i],
   ["drainage-water", 90, /\b(?:drainage|water|pond|lake|attenuation)\b/i]
@@ -49,15 +50,28 @@ function searchableText(entry, applicationMetadata) {
   return [
     entry.title,
     entry.name,
+    entry.text,
     entry.description,
     entry.documentType,
     entry.document_type,
+    entry.role,
+    entry.documentRole,
+    entry.document_role,
+    entry.drawingTitle,
+    entry.drawing_title,
     entry.label,
     applicationMetadata?.title,
     applicationMetadata?.name,
+    applicationMetadata?.text,
     applicationMetadata?.description,
     applicationMetadata?.documentType,
-    applicationMetadata?.document_type
+    applicationMetadata?.document_type,
+    applicationMetadata?.role,
+    applicationMetadata?.documentRole,
+    applicationMetadata?.document_role,
+    applicationMetadata?.drawingTitle,
+    applicationMetadata?.drawing_title,
+    applicationMetadata?.label
   ].filter(Boolean).join(" ").trim();
 }
 
@@ -179,8 +193,9 @@ async function validateDocument(directory, entry, metadata) {
     sha256: actualHash,
     mime: String(entry.mime).toLowerCase(),
     applicationReference: metadata?.applicationReference || entry.applicationReference || null,
-    title: entry.title || entry.name || metadata?.title || metadata?.name || null,
+    title: entry.title || entry.name || entry.text || metadata?.title || metadata?.name || metadata?.text || null,
     documentType: entry.documentType || entry.document_type || metadata?.documentType || metadata?.document_type || null,
+    role: entry.role || entry.documentRole || entry.document_role || metadata?.role || metadata?.documentRole || metadata?.document_role || null,
     classification: classification.classification,
     priority: classification.priority,
     narrative: classification.narrative,
