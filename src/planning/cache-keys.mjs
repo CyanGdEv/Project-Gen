@@ -8,12 +8,14 @@ export function planningSemanticKey({ pageSha256, extractorVersion = "semantic-v
   return contentKey("planning-semantic", { pageSha256, extractorVersion });
 }
 
-export function planningStrongGeoreferenceKey({ documentSha256, page, pageSha256, semanticHash, version = "strong-georef-v2-null-safe" }) {
-  // v1 could coerce missing/null controls to numeric zero. Treat every legacy
-  // v1 caller as v2 so a stale accepted (0,0) control result can never survive
-  // the null-safety behavior change in an existing warm cache.
-  const cacheVersion = version === "strong-georef-v1" ? "strong-georef-v2-null-safe" : version;
-  return contentKey("planning-strong-georeference", { documentSha256, page, pageSha256, semanticHash, version: cacheVersion });
+export function planningStrongGeoreferenceKey({ documentSha256, page, pageSha256, semanticHash, bbox = null, version = "strong-georef-v3-null-safe-geofence" }) {
+  // v1 could coerce missing/null controls to numeric zero and v2 did not scope
+  // cached acceptance to the request geofence. Force legacy callers onto v3,
+  // where bbox participates in the cache key so cross-park reuse is impossible.
+  const cacheVersion = ["strong-georef-v1", "strong-georef-v2-null-safe"].includes(version)
+    ? "strong-georef-v3-null-safe-geofence"
+    : version;
+  return contentKey("planning-strong-georeference", { documentSha256, page, pageSha256, semanticHash, bbox, version: cacheVersion });
 }
 
 export function planningRegistrationKey({ pageSha256, referenceHash, registrationVersion = "registration-v1", bbox = null, locationPrior = null }) {
