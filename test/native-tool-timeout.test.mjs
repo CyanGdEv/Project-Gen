@@ -25,7 +25,7 @@ test("timed-out native tools terminate descendant processes", { skip: process.pl
   }
 });
 
-test("planning workers expose independent raster, OCR, PDF-text and registration budgets", () => {
+test("planning workers expose independent raster, OCR, PDF-text and registration budgets with the global safety floor", () => {
   const processors = createNativePlanningProcessors({
     toolTimeoutMs: 1000,
     renderTimeoutMs: 3200,
@@ -37,7 +37,7 @@ test("planning workers expose independent raster, OCR, PDF-text and registration
     toolTimeoutMs: 1000,
     renderTimeoutMs: 3200,
     semanticTimeoutMs: 2100,
-    semanticTextTimeoutMs: 750,
+    semanticTextTimeoutMs: 1000,
     registerTimeoutMs: 4300
   });
 });
