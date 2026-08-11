@@ -28,16 +28,16 @@ function parseUrl(value) {
 function allowedCandidateUrls(entry, options = {}) {
   const primary = parseUrl(entry?.url || entry?.finalUrl);
   if (!primary || primary.protocol !== "https:") throw new Error(`planning document URL must be HTTPS: ${entry?.url || "missing"}`);
-  const output = [primary];
   const transport = parseUrl(entry?.transportUrl);
-  if (transport && transport.href !== primary.href) {
-    const legacyAllowed = Boolean(options.allowLegacyHttpTransport)
-      && transport.protocol === "http:"
-      && transport.hostname === primary.hostname
-      && String(entry?.tlsVerification || "") === "legacy-http-official-host";
-    if (transport.protocol === "https:" || legacyAllowed) output.push(transport);
-  }
-  return output;
+  if (!transport || transport.href === primary.href) return [primary];
+
+  const legacyAllowed = Boolean(options.allowLegacyHttpTransport)
+    && transport.protocol === "http:"
+    && transport.hostname === primary.hostname
+    && String(entry?.tlsVerification || "") === "legacy-http-official-host";
+  if (legacyAllowed) return [transport, primary];
+  if (transport.protocol === "https:") return [primary, transport];
+  return [primary];
 }
 
 function finalUrlAllowed(responseUrl, primary, candidate, options = {}) {
@@ -65,8 +65,8 @@ async function existingArtifactState(target, entry) {
 async function fetchVerified(entry, target, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new Error("planning hydrator requires fetch()");
+  const primary = parseUrl(entry?.url || entry?.finalUrl);
   const urls = allowedCandidateUrls(entry, options);
-  const primary = urls[0];
   const expectedBytes = Number(entry.bytes);
   const expectedSha256 = String(entry.sha256 || "").toLowerCase();
   if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 1) throw new Error(`invalid declared planning document bytes for ${entry.file}`);
