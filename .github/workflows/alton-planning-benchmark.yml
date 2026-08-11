@@ -5,6 +5,7 @@ on:
     paths:
       - "src/planning/prefetch-hydrate.mjs"
       - "src/planning/native-workers.mjs"
+      - "src/planning/fast-path.mjs"
       - "src/sources/osm-overpass.mjs"
       - "src/sources/http-json.mjs"
       - "scripts/hydrate-planning-prefetch.mjs"
