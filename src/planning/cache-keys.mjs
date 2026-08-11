@@ -8,6 +8,10 @@ export function planningSemanticKey({ pageSha256, extractorVersion = "semantic-v
   return contentKey("planning-semantic", { pageSha256, extractorVersion });
 }
 
+export function planningStrongGeoreferenceKey({ documentSha256, page, pageSha256, semanticHash, version = "strong-georef-v1" }) {
+  return contentKey("planning-strong-georeference", { documentSha256, page, pageSha256, semanticHash, version });
+}
+
 export function planningRegistrationKey({ pageSha256, referenceHash, registrationVersion = "registration-v1", bbox = null, locationPrior = null }) {
   return contentKey("planning-registration", { pageSha256, referenceHash, registrationVersion, bbox, locationPrior });
 }
