@@ -21,8 +21,25 @@ const GEOMETRY_TERMS = [
   ["topographical-survey", 112, /\b(?:topographical|topographic|topo)\s+(?:survey|plan|drawing)\b/i],
   ["landscape", 110, /\b(?:landscape|landscaping|planting|hardscape|hard\s+landscaping)\b/i],
   ["elevation", 100, /\b(?:elevation|section|roof\s+plan)\b/i],
-  ["drainage-water", 90, /\b(?:drainage|water|pond|lake|attenuation)\b/i]
+  ["drainage-water", 90, /\b(?:drainage|water|pond|lake|attenuation)\b.*\b(?:plan|layout|drawing|detail|strategy)\b|\b(?:plan|layout|drawing|detail|strategy)\b.*\b(?:drainage|water|pond|lake|attenuation)\b/i]
 ];
+
+const ROLE_CLASSIFICATIONS = Object.freeze([
+  ["ride-layout", "ride-layout", 150],
+  ["ride-support", "ride-layout", 145],
+  ["site-plan", "site-plan", 130],
+  ["block-plan", "block-plan", 125],
+  ["general-arrangement", "general-arrangement", 120],
+  ["layout", "layout", 115],
+  ["topographical-survey", "topographical-survey", 112],
+  ["topographic-survey", "topographical-survey", 112],
+  ["landscape", "landscape", 110],
+  ["elevation", "elevation", 100],
+  ["section", "elevation", 100],
+  ["terrain-or-drainage", "drainage-water", 90],
+  ["drainage", "drainage-water", 90],
+  ["water", "drainage-water", 90]
+]);
 
 const NARRATIVE_TERMS = /\b(?:statement|report|letter|application\s+form|cover(?:ing)?\s+letter|certificate|notice|checklist|consultation|decision|condition|assessment|survey\s+report)\b/i;
 
@@ -46,6 +63,24 @@ function strictCount(value, name) {
   return number;
 }
 
+function roleText(metadata = {}) {
+  return [metadata.role, metadata.documentRole, metadata.document_role]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase())
+    .join(" ");
+}
+
+function explicitRoleClassification(metadata = {}) {
+  const role = [roleText(metadata), roleText(metadata.applicationMetadata)].filter(Boolean).join(" ");
+  if (!role) return null;
+  for (const [token, classification, priority] of ROLE_CLASSIFICATIONS) {
+    if (role === token || role.split(/\s+/).includes(token) || role.includes(token)) {
+      return { classification, priority, narrative: false };
+    }
+  }
+  return null;
+}
+
 function searchableText(entry, applicationMetadata) {
   return [
     entry.title,
@@ -54,9 +89,6 @@ function searchableText(entry, applicationMetadata) {
     entry.description,
     entry.documentType,
     entry.document_type,
-    entry.role,
-    entry.documentRole,
-    entry.document_role,
     entry.drawingTitle,
     entry.drawing_title,
     entry.label,
@@ -66,9 +98,6 @@ function searchableText(entry, applicationMetadata) {
     applicationMetadata?.description,
     applicationMetadata?.documentType,
     applicationMetadata?.document_type,
-    applicationMetadata?.role,
-    applicationMetadata?.documentRole,
-    applicationMetadata?.document_role,
     applicationMetadata?.drawingTitle,
     applicationMetadata?.drawing_title,
     applicationMetadata?.label
@@ -76,11 +105,13 @@ function searchableText(entry, applicationMetadata) {
 }
 
 export function classifyPlanningDocument(metadata = {}) {
+  const explicit = explicitRoleClassification(metadata);
+  if (explicit) return explicit;
   const text = searchableText(metadata, metadata.applicationMetadata);
+  if (NARRATIVE_TERMS.test(text)) return { classification: "narrative", priority: -100, narrative: true };
   for (const [classification, score, pattern] of GEOMETRY_TERMS) {
     if (pattern.test(text)) return { classification, priority: score, narrative: false };
   }
-  if (NARRATIVE_TERMS.test(text)) return { classification: "narrative", priority: -100, narrative: true };
   return { classification: "unknown", priority: 0, narrative: false };
 }
 
