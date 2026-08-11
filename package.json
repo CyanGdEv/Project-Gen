@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check src/authority.mjs && node --check src/cache.mjs && node --check src/task-graph.mjs && node --check src/budget.mjs && node --check src/source-catalog.mjs && node --check src/source-runtime.mjs && node --check src/sources/planning-prefetch.mjs && node --check src/sources/http-json.mjs && node --check src/sources/osm-overpass.mjs && node --check src/planning/georeference.mjs && node --check src/planning/cache-keys.mjs && node --check src/planning/vectorize.mjs && node --check src/planning/fast-path.mjs",
+    "check": "node --check src/authority.mjs && node --check src/cache.mjs && node --check src/task-graph.mjs && node --check src/budget.mjs && node --check src/source-catalog.mjs && node --check src/source-runtime.mjs && node --check src/sources/planning-prefetch.mjs && node --check src/sources/http-json.mjs && node --check src/sources/osm-overpass.mjs && node --check src/planning/georeference.mjs && node --check src/planning/cache-keys.mjs && node --check src/planning/vectorize.mjs && node --check src/planning/fast-path.mjs && node --check src/planning/semantics.mjs",
     "test": "node --test"
   }
 }
