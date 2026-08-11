@@ -3,7 +3,6 @@ import path from "node:path";
 import { FileArtifactCache } from "../cache.mjs";
 import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
-import { planningStrongGeoreferenceKey } from "./cache-keys.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
 import { buildPlanningReference } from "./reference-raster.mjs";
 import { resolveStrongGeoreference } from "./strong-georeference.mjs";
@@ -111,33 +110,56 @@ export async function preparePrefetchDocuments(planningDirectory, ingestion, opt
 }
 
 export function createPriorityPlanningProcessors(options = {}) {
-  const native = options.nativeProcessors || createNativePlanningProcessors(options);
-  const cache = options.cache || null;
+  const baseNative = options.nativeProcessors || createNativePlanningProcessors({ ...options, referenceImagePath: null });
+  let visualNative = null;
+  let visualContext = null;
+
+  async function getVisualRegistrationContext() {
+    if (visualContext) return visualContext;
+    if (typeof options.ensureVisualReference !== "function") {
+      if (!options.referenceImagePath) throw new Error("visual planning registration requires a reference source");
+      const referenceImagePath = path.resolve(options.referenceImagePath);
+      visualContext = {
+        referenceImagePath,
+        referenceHash: options.referenceHash || await sha256File(referenceImagePath)
+      };
+      return visualContext;
+    }
+    visualContext = await options.ensureVisualReference();
+    if (!visualContext?.referenceImagePath || !visualContext?.referenceHash) throw new Error("visual reference resolver returned an incomplete context");
+    return visualContext;
+  }
+
+  async function getVisualNative() {
+    if (visualNative) return visualNative;
+    const context = await getVisualRegistrationContext();
+    visualNative = createNativePlanningProcessors({ ...options, referenceImagePath: context.referenceImagePath });
+    return visualNative;
+  }
+
   return {
-    ...native,
-    async registerPage(args) {
-      const key = planningStrongGeoreferenceKey({
-        documentSha256: args.document?.sha256,
-        page: args.page,
-        pageSha256: args.render?.sha256,
-        semanticHash: args.semantics?.sha256 || "none",
-        version: options.strongGeoreferenceVersion || "strong-georef-v1"
+    ...baseNative,
+    async resolveStrongGeoreference(args) {
+      return resolveStrongGeoreference(args, {
+        runTool: options.runTool || runTool,
+        gdalinfo: options.gdalinfo,
+        gdaltransform: options.gdaltransform,
+        toolTimeoutMs: options.toolTimeoutMs,
+        geofencePaddingM: options.geofencePaddingM,
+        failOnEmbeddedInspectionError: options.failOnEmbeddedInspectionError
       });
-      let strongRecord = cache ? await cache.get(key) : null;
-      if (!strongRecord?.resolved) {
-        const strong = await resolveStrongGeoreference(args, {
-          runTool: options.runTool || runTool,
-          gdalinfo: options.gdalinfo,
-          gdaltransform: options.gdaltransform,
-          toolTimeoutMs: options.toolTimeoutMs,
-          geofencePaddingM: options.geofencePaddingM,
-          failOnEmbeddedInspectionError: options.failOnEmbeddedInspectionError
-        });
-        strongRecord = { resolved: true, value: strong };
-        if (cache) await cache.put(key, strongRecord);
-      }
-      if (strongRecord.value) return strongRecord.value;
+    },
+    getVisualRegistrationContext,
+    async registerPage(args) {
+      const native = await getVisualNative();
       return native.registerPage(args);
+    },
+    async vectorizePage(args) {
+      if (args.candidate?.matrix) {
+        const native = await getVisualNative();
+        return native.vectorizePage(args);
+      }
+      return baseNative.vectorizePage(args);
     }
   };
 }
@@ -154,33 +176,53 @@ export async function runPlanningPrefetchFastPath(options = {}) {
   });
   const documents = await preparePrefetchDocuments(options.planningDirectory, ingestion, options);
 
-  let referenceImagePath = options.referenceImagePath ? path.resolve(options.referenceImagePath) : null;
-  let reference = null;
-  if (!referenceImagePath) {
-    const source = options.referenceSource || options.osmSource || null;
-    if (!source?.payload) throw new Error("referenceImagePath or referenceSource payload is required for visual-registration fallback");
-    reference = await buildPlanningReference({
-      source,
-      bbox: options.bbox,
-      cache,
-      options: options.referenceOptions || {}
-    });
-    referenceImagePath = reference.path;
+  let resolvedReference = null;
+  let referencePromise = null;
+  async function ensureVisualReference() {
+    if (resolvedReference) return resolvedReference;
+    if (referencePromise) return referencePromise;
+    referencePromise = (async () => {
+      if (options.referenceImagePath) {
+        const referenceImagePath = path.resolve(options.referenceImagePath);
+        const referenceHash = options.referenceHash || await sha256File(referenceImagePath);
+        resolvedReference = {
+          referenceImagePath,
+          referenceHash,
+          reference: { path: referenceImagePath, sha256: referenceHash, role: "registration-context-only" }
+        };
+        return resolvedReference;
+      }
+      const source = options.referenceSource || options.osmSource || null;
+      if (!source?.payload) throw new Error("visual registration fallback requires referenceImagePath or referenceSource payload");
+      const reference = await buildPlanningReference({
+        source,
+        bbox: options.bbox,
+        cache,
+        options: options.referenceOptions || {}
+      });
+      resolvedReference = {
+        referenceImagePath: reference.path,
+        referenceHash: reference.sha256,
+        reference
+      };
+      return resolvedReference;
+    })();
+    return referencePromise;
   }
 
-  const referenceHash = options.referenceHash || reference?.sha256 || await sha256File(referenceImagePath);
-  const processors = createPriorityPlanningProcessors({ ...options, cache, referenceImagePath });
+  const processors = createPriorityPlanningProcessors({ ...options, cache, ensureVisualReference });
   const result = await runPlanningFastPath({
     documents,
     cache,
     processors,
-    referenceHash,
+    referenceHash: options.referenceHash || null,
     bbox: options.bbox,
     options: {
       concurrency: options.concurrency || 4,
       dpi: options.dpi || 240,
       rendererVersion: options.rendererVersion || "render-v1",
       extractorVersion: options.extractorVersion || "semantic-v2-lines",
+      strongGeoreferenceVersion: options.strongGeoreferenceVersion || "strong-georef-v1",
       registrationVersion: options.registrationVersion || "registration-v2-priority",
       vectorizerVersion: options.vectorizerVersion || "vector-v1",
       planningAutomaticRegistrationConsensusM: options.planningAutomaticRegistrationConsensusM,
@@ -197,8 +239,8 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       stats: ingestion.stats
     },
     processedDocuments: documents.length,
-    reference: reference ? { ...reference } : { path: referenceImagePath, sha256: referenceHash, role: "registration-context-only" },
-    referenceHash,
+    reference: resolvedReference?.reference || { role: "registration-context-only", status: "not-needed" },
+    referenceHash: resolvedReference?.referenceHash || null,
     ...result
   };
 }
