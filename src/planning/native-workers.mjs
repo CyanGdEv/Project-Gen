@@ -149,6 +149,15 @@ export function choosePlanningRasterDpi(requestedDpi, pageSize = null, options =
   return Math.round(Math.max(minDpi, Math.min(requested, pixelBoundDpi)));
 }
 
+export function scalePlanningPixelThreshold(basePixels, render, options = {}) {
+  const base = Math.max(0, Number(basePixels || 0));
+  const requestedDpi = Math.max(1, Number(render?.requestedDpi || render?.dpi || 240));
+  const effectiveDpi = Math.max(1, Number(render?.dpi || requestedDpi));
+  const scale = Math.min(1, effectiveDpi / requestedDpi);
+  const minimum = Math.max(0, Number(options.minimum ?? 1));
+  return Math.max(minimum, base * scale);
+}
+
 export function createNativePlanningProcessors(options = {}) {
   const artifactRoot = path.resolve(options.artifactRoot || ".project-gen-cache/planning-artifacts");
   const referenceImagePath = options.referenceImagePath ? path.resolve(options.referenceImagePath) : null;
@@ -281,7 +290,7 @@ export function createNativePlanningProcessors(options = {}) {
       bbox,
       candidate,
       semantics,
-      semanticDistancePx: Number(options.semanticDistancePx ?? 120)
+      semanticDistancePx: scalePlanningPixelThreshold(Number(options.semanticDistancePx ?? 120), render, { minimum: 24 })
     };
     const { stdout } = await runTool(python, [registrationScript, "vectorize"], { input: request, timeoutMs: registerTimeoutMs });
     const result = JSON.parse(stdout);
