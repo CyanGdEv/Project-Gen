@@ -3,6 +3,7 @@ import { createHttpJsonAdapter } from "./http-json.mjs";
 export const OSM_OVERPASS_ADAPTER_VERSION = 2;
 export const DEFAULT_OVERPASS_USER_AGENT = "Project-Gen/0.1 (+https://github.com/CyanGdEv/Project-Gen)";
 export const DEFAULT_OVERPASS_REFERER = "https://github.com/CyanGdEv/Project-Gen";
+export const DEFAULT_OSM_STALE_IF_ERROR_MS = 7 * 24 * 60 * 60 * 1000;
 
 function finiteCoordinate(value, name, min, max) {
   const number = Number(value);
@@ -53,6 +54,7 @@ function endpointAdapter(endpoint, options = {}) {
   return createHttpJsonAdapter({
     id: "osm",
     freshForMs: options.freshForMs ?? 6 * 60 * 60 * 1000,
+    staleIfErrorMs: options.staleIfErrorMs ?? DEFAULT_OSM_STALE_IF_ERROR_MS,
     maxBytes: options.maxBytes ?? 40 * 1024 * 1024,
     timeoutMs: options.timeoutMs ?? 25000,
     cache: options.cache,
@@ -99,7 +101,10 @@ export function createOsmOverpassAdapter(options = {}) {
         }
       }
       const summary = failures.map((failure) => `${failure.endpoint}: ${failure.message}`).join(" | ");
-      throw new Error(`osm source failed across ${failures.length} endpoint(s): ${summary}`);
+      const error = new Error(`osm source failed across ${failures.length} endpoint(s): ${summary}`);
+      error.code = "OSM_REFERENCE_UNAVAILABLE";
+      error.failures = failures;
+      throw error;
     }
   });
 }
