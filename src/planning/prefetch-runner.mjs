@@ -36,12 +36,14 @@ function metadataIndex(manifest) {
   const byFile = new Map();
   for (const application of manifest.applications || []) {
     const applicationReference = application?.reference || application?.applicationReference || application?.application_reference || null;
+    const applicationStatus = application?.status || application?.applicationStatus || application?.application_status || "unknown";
     const appLocation = locationPrior(application);
     for (const document of application?.downloadedDocuments || application?.documents || []) {
       if (!document || typeof document !== "object") continue;
       const metadata = {
         ...document,
         applicationReference,
+        applicationStatus,
         locationPrior: locationPrior(document) || appLocation,
         explicitControlPoints: document.explicitControlPoints || document.controlPoints || document.georeference?.points || null,
         georeference: document.georeference || null
@@ -108,6 +110,7 @@ export async function preparePrefetchDocuments(planningDirectory, ingestion, opt
       file: document.file,
       path: safePath(root, document.file),
       applicationReference: extra.applicationReference || document.applicationReference || "unknown",
+      applicationStatus: extra.applicationStatus || document.applicationStatus || "unknown",
       locationPrior: extra.locationPrior || null,
       explicitControlPoints: extra.explicitControlPoints || null,
       georeference: extra.georeference || null
