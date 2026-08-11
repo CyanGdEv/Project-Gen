@@ -150,7 +150,8 @@ async function fetchVerified(entry, target, options = {}) {
   if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error(`invalid declared planning document sha256 for ${entry.file}`);
 
   const retries = Math.min(5, Math.max(0, Number(options.retries ?? 2)));
-  const attemptTimeoutMs = Math.max(1000, Number(options.attemptTimeoutMs || Math.min(Number(options.timeoutMs || 45000), 20000)));
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs || 45000));
+  const attemptTimeoutMs = Math.max(1000, Number(options.attemptTimeoutMs || timeoutMs));
   const retryDelayMs = Math.max(0, Number(options.retryDelayMs ?? 250));
   const temp = `${target}.partial-${process.pid}-${Date.now()}`;
   const attempts = [];
