@@ -1,8 +1,14 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { bridgePlanningForPinnedVme } from "../src/world/vme-planning-bridge.mjs";
+
+const execFileAsync = promisify(execFile);
+const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
   const options = { input: null, output: null, report: null };
@@ -19,8 +25,19 @@ function parseArgs(argv) {
   return options;
 }
 
+async function configureActionsCompilerTransport() {
+  if (String(process.env.GITHUB_ACTIONS || "").toLowerCase() !== "true") return null;
+  const helper = path.join(SCRIPT_DIRECTORY, "configure-compiler-git-transport.sh");
+  const { stdout } = await execFileAsync("bash", [helper], {
+    env: process.env,
+    maxBuffer: 1024 * 1024
+  });
+  return String(stdout || "").trim() || "configured";
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const transport = await configureActionsCompilerTransport();
   const inputPath = path.resolve(options.input);
   const outputPath = path.resolve(options.output);
   const reportPath = path.resolve(options.report);
@@ -36,6 +53,7 @@ async function main() {
   ]);
   console.log(JSON.stringify({
     status: "complete",
+    compilerGitTransport: transport,
     inputFeatures: result.report.inputFeatures,
     outputFeatures: result.report.outputFeatures,
     withheldFeatures: result.report.withheldFeatures,
