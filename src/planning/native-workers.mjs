@@ -3,16 +3,24 @@ import { spawn } from "node:child_process";
 import { access, copyFile, mkdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { extractSemanticAnchorsFromTsv } from "./semantics.mjs";
+import {
+  extractSemanticAnchorsFromPopplerBbox,
+  extractSemanticAnchorsFromTsv,
+  semanticTextIsUseful
+} from "./semantics.mjs";
 
 const DEFAULT_REGISTER_TIMEOUT_MS = 25000;
 const DEFAULT_TOOL_TIMEOUT_MS = 15000;
 const DEFAULT_RENDER_TIMEOUT_MS = 30000;
-const DEFAULT_SEMANTIC_TIMEOUT_MS = 20000;
+const DEFAULT_SEMANTIC_TIMEOUT_MS = 10000;
+const DEFAULT_SEMANTIC_TEXT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_STDOUT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_RASTER_LONG_EDGE_PX = 5200;
 const DEFAULT_MIN_RASTER_DPI = 120;
 const DEFAULT_FALLBACK_RASTER_DPI = 180;
+const DEFAULT_MAX_OCR_LONG_EDGE_PX = 2800;
+const DEFAULT_MIN_OCR_DPI = 72;
+const DEFAULT_FALLBACK_OCR_DPI = 120;
 
 function safeToken(value) {
   return String(value || "unknown").replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 96) || "unknown";
@@ -32,6 +40,10 @@ function documentPath(document) {
   const filename = document?.path || document?.file || document?.sourceFile;
   if (!filename) throw new Error(`planning document ${document?.id || document?.sha256 || "unknown"} has no local path`);
   return path.resolve(filename);
+}
+
+function isPdfDocument(document, source = documentPath(document)) {
+  return String(document?.mime || "").toLowerCase() === "application/pdf" || source.toLowerCase().endsWith(".pdf");
 }
 
 function terminateProcessTree(child, signal = "SIGKILL") {
@@ -140,7 +152,7 @@ export function parsePdfPageSize(text, page = null) {
 
 export function choosePlanningRasterDpi(requestedDpi, pageSize = null, options = {}) {
   const requested = Math.max(72, Math.min(600, Number(requestedDpi || 240)));
-  const maxLongEdgePx = Math.max(1800, Number(options.maxLongEdgePx || DEFAULT_MAX_RASTER_LONG_EDGE_PX));
+  const maxLongEdgePx = Math.max(1200, Number(options.maxLongEdgePx || DEFAULT_MAX_RASTER_LONG_EDGE_PX));
   const minDpi = Math.max(72, Math.min(requested, Number(options.minDpi || DEFAULT_MIN_RASTER_DPI)));
   const fallbackDpi = Math.max(minDpi, Math.min(requested, Number(options.fallbackDpi || DEFAULT_FALLBACK_RASTER_DPI)));
   const longestPoints = Math.max(Number(pageSize?.widthPoints || 0), Number(pageSize?.heightPoints || 0));
@@ -158,30 +170,47 @@ export function scalePlanningPixelThreshold(basePixels, render, options = {}) {
   return Math.max(minimum, base * scale);
 }
 
+function unavailableSemantics(engine, error = null) {
+  const code = String(error?.code || "semantic-unavailable");
+  const marker = `${engine}:${code}`;
+  return {
+    anchors: [],
+    lines: [],
+    text: "",
+    sha256: createHash("sha256").update(marker).digest("hex"),
+    engine,
+    unavailable: true,
+    errorCode: error?.code || null,
+    errorMessage: error?.message || null
+  };
+}
+
 export function createNativePlanningProcessors(options = {}) {
   const artifactRoot = path.resolve(options.artifactRoot || ".project-gen-cache/planning-artifacts");
   const referenceImagePath = options.referenceImagePath ? path.resolve(options.referenceImagePath) : null;
   const pdftoppm = options.pdftoppm || "pdftoppm";
   const pdfinfo = options.pdfinfo || "pdfinfo";
+  const pdftotext = options.pdftotext || "pdftotext";
   const tesseract = options.tesseract || "tesseract";
   const python = options.python || "python3";
   const registrationScript = path.resolve(options.registrationScript || fileURLToPath(new URL("./planning_auto_register.py", import.meta.url)));
   const toolTimeoutMs = Math.max(1000, Number(options.toolTimeoutMs || DEFAULT_TOOL_TIMEOUT_MS));
   const renderTimeoutMs = Math.max(toolTimeoutMs, Number(options.renderTimeoutMs || DEFAULT_RENDER_TIMEOUT_MS));
-  const semanticTimeoutMs = Math.max(toolTimeoutMs, Number(options.semanticTimeoutMs || DEFAULT_SEMANTIC_TIMEOUT_MS));
+  const semanticTimeoutMs = Math.max(1000, Number(options.semanticTimeoutMs || DEFAULT_SEMANTIC_TIMEOUT_MS));
+  const semanticTextTimeoutMs = Math.max(1000, Number(options.semanticTextTimeoutMs || DEFAULT_SEMANTIC_TEXT_TIMEOUT_MS));
   const preflightTimeoutMs = Math.max(1000, Math.min(renderTimeoutMs, Number(options.preflightTimeoutMs || 5000)));
   const registerTimeoutMs = Math.max(toolTimeoutMs, Number(options.registerTimeoutMs || DEFAULT_REGISTER_TIMEOUT_MS));
   const semanticMinConfidence = Number(options.semanticMinConfidence ?? 35);
 
   async function renderPage({ document, page, dpi }) {
     const source = documentPath(document);
-    const mime = String(document?.mime || "").toLowerCase();
+    const pdf = isPdfDocument(document, source);
     const documentId = safeToken(document.sha256 || document.id);
     const requestedDpi = Number(dpi || 240);
     let effectiveDpi = requestedDpi;
     let pageSize = null;
 
-    if (mime === "application/pdf" || source.toLowerCase().endsWith(".pdf")) {
+    if (pdf) {
       try {
         const { stdout } = await runTool(pdfinfo, ["-f", String(page), "-l", String(page), source], {
           timeoutMs: preflightTimeoutMs,
@@ -203,7 +232,7 @@ export function createNativePlanningProcessors(options = {}) {
     await mkdir(directory, { recursive: true });
     const target = path.join(directory, `${key}.png`);
 
-    if (mime === "application/pdf" || source.toLowerCase().endsWith(".pdf")) {
+    if (pdf) {
       const base = target.slice(0, -4);
       try {
         await runTool(pdftoppm, [
@@ -234,7 +263,7 @@ export function createNativePlanningProcessors(options = {}) {
       requestedDpi,
       adaptiveRaster: Number(effectiveDpi) < requestedDpi,
       pageSizePoints: pageSize,
-      renderer: mime === "application/pdf" || source.toLowerCase().endsWith(".pdf") ? "pdftoppm-gray-adaptive-v1" : "image-copy"
+      renderer: pdf ? "pdftoppm-gray-adaptive-v1" : "image-copy"
     };
   }
 
@@ -248,21 +277,75 @@ export function createNativePlanningProcessors(options = {}) {
     }
   }
 
-  async function extractSemantics({ document, page, render }) {
-    let stdout;
+  async function extractPdfTextSemantics(document, page, render) {
+    const source = documentPath(document);
+    if (!isPdfDocument(document, source)) return null;
     try {
-      ({ stdout } = await runTool(tesseract, [render.path, "stdout", "--dpi", String(render.dpi || 240), "tsv"], {
-        timeoutMs: semanticTimeoutMs,
-        maxStdoutBytes: 16 * 1024 * 1024
-      }));
+      const { stdout } = await runTool(pdftotext, [
+        "-f", String(page), "-l", String(page), "-bbox-layout", "-nopgbrk", source, "-"
+      ], { timeoutMs: semanticTextTimeoutMs, maxStdoutBytes: 16 * 1024 * 1024 });
+      const parsed = extractSemanticAnchorsFromPopplerBbox(stdout, render);
+      if (!semanticTextIsUseful(parsed, { minWords: options.semanticPdfMinWords ?? 5, minChars: options.semanticPdfMinChars ?? 32 })) return null;
+      return {
+        ...parsed,
+        engine: "poppler-bbox-v1",
+        embeddedText: true,
+        xhtmlSha256: createHash("sha256").update(stdout).digest("hex")
+      };
     } catch (error) {
-      const wrapped = new Error(`planning OCR failed document=${safeToken(document?.sha256 || document?.id)} page=${Number(page)}: ${error.message}`, { cause: error });
-      wrapped.code = error?.code;
-      wrapped.recoverablePlanningPage = Boolean(error?.recoverablePlanningPage);
-      throw wrapped;
+      if (!error?.recoverablePlanningPage) throw error;
+      return null;
     }
-    const parsed = extractSemanticAnchorsFromTsv(stdout, { minConfidence: semanticMinConfidence });
-    return { ...parsed, engine: "tesseract-tsv", tsvSha256: createHash("sha256").update(stdout).digest("hex") };
+  }
+
+  async function renderOcrFallback(document, page, render) {
+    const source = documentPath(document);
+    if (!isPdfDocument(document, source)) return { path: render.path, width: render.width, height: render.height, dpi: render.dpi, temporary: false };
+    const ocrDpi = choosePlanningRasterDpi(render.requestedDpi || render.dpi || 240, render.pageSizePoints, {
+      maxLongEdgePx: options.maxOcrLongEdgePx || DEFAULT_MAX_OCR_LONG_EDGE_PX,
+      minDpi: options.minOcrDpi || DEFAULT_MIN_OCR_DPI,
+      fallbackDpi: options.fallbackOcrDpi || DEFAULT_FALLBACK_OCR_DPI
+    });
+    if (ocrDpi >= Number(render.dpi || 0) * 0.95) return { path: render.path, width: render.width, height: render.height, dpi: render.dpi, temporary: false };
+    const directory = path.join(artifactRoot, "ocr-renders");
+    await mkdir(directory, { recursive: true });
+    const target = path.join(directory, `${safeToken(document.sha256 || document.id)}-p${Number(page)}-${ocrDpi}.png`);
+    const base = target.slice(0, -4);
+    await runTool(pdftoppm, [
+      "-f", String(page), "-l", String(page), "-singlefile", "-gray", "-png", "-r", String(ocrDpi), source, base
+    ], { timeoutMs: Math.min(renderTimeoutMs, Math.max(8000, semanticTimeoutMs)) });
+    const data = await readFile(target);
+    const dimensions = pngDimensions(data);
+    return { path: target, ...dimensions, dpi: ocrDpi, temporary: true };
+  }
+
+  async function extractSemantics({ document, page, render }) {
+    const embedded = await extractPdfTextSemantics(document, page, render);
+    if (embedded) return embedded;
+
+    let ocrRender = null;
+    try {
+      ocrRender = await renderOcrFallback(document, page, render);
+      const { stdout } = await runTool(tesseract, [
+        ocrRender.path, "stdout", "--dpi", String(ocrRender.dpi || render.dpi || 120), "--psm", "11", "tsv"
+      ], { timeoutMs: semanticTimeoutMs, maxStdoutBytes: 16 * 1024 * 1024 });
+      const parsed = extractSemanticAnchorsFromTsv(stdout, {
+        minConfidence: semanticMinConfidence,
+        coordinateScaleX: Number(render.width) / Math.max(1, Number(ocrRender.width || render.width)),
+        coordinateScaleY: Number(render.height) / Math.max(1, Number(ocrRender.height || render.height))
+      });
+      return {
+        ...parsed,
+        engine: ocrRender.temporary ? "tesseract-bounded-ocr-v1" : "tesseract-sparse-v1",
+        ocrDpi: Number(ocrRender.dpi || render.dpi || 0),
+        coordinateScaleX: Number(render.width) / Math.max(1, Number(ocrRender.width || render.width)),
+        coordinateScaleY: Number(render.height) / Math.max(1, Number(ocrRender.height || render.height)),
+        tsvSha256: createHash("sha256").update(stdout).digest("hex")
+      };
+    } catch (error) {
+      if (!error?.recoverablePlanningPage) throw error;
+      return unavailableSemantics("semantic-unavailable-v1", error);
+    }
   }
 
   async function registerPage({ document, render, semantics, bbox }) {
@@ -307,13 +390,16 @@ export function createNativePlanningProcessors(options = {}) {
       artifactRoot,
       referenceImagePath,
       registrationScript,
-      timeouts: { toolTimeoutMs, renderTimeoutMs, semanticTimeoutMs, registerTimeoutMs },
+      timeouts: { toolTimeoutMs, renderTimeoutMs, semanticTimeoutMs, semanticTextTimeoutMs, registerTimeoutMs },
       raster: {
         maxLongEdgePx: Number(options.maxRasterLongEdgePx || DEFAULT_MAX_RASTER_LONG_EDGE_PX),
         minDpi: Number(options.minRasterDpi || DEFAULT_MIN_RASTER_DPI),
-        fallbackDpi: Number(options.fallbackRasterDpi || DEFAULT_FALLBACK_RASTER_DPI)
+        fallbackDpi: Number(options.fallbackRasterDpi || DEFAULT_FALLBACK_RASTER_DPI),
+        maxOcrLongEdgePx: Number(options.maxOcrLongEdgePx || DEFAULT_MAX_OCR_LONG_EDGE_PX),
+        minOcrDpi: Number(options.minOcrDpi || DEFAULT_MIN_OCR_DPI),
+        fallbackOcrDpi: Number(options.fallbackOcrDpi || DEFAULT_FALLBACK_OCR_DPI)
       },
-      tools: { pdftoppm, pdfinfo, tesseract, python }
+      tools: { pdftoppm, pdfinfo, pdftotext, tesseract, python }
     }
   };
 }
@@ -327,4 +413,4 @@ export async function nativePlanningWorkerSelfTest(options = {}) {
   return result;
 }
 
-export { runTool, sha256File, terminateProcessTree };
+export { runTool, sha256File, terminateProcessTree, unavailableSemantics };
