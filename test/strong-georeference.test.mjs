@@ -18,11 +18,13 @@ test("embedded geospatial metadata wins before explicit controls", async () => {
     runTool: async (command) => {
       calls += 1;
       assert.equal(command, "gdalinfo");
-      return { stdout: JSON.stringify({ wgs84Extent: { coordinates: [[[-1.89, 52.995], [-1.86, 52.995], [-1.86, 52.975], [-1.89, 52.975], [-1.89, 52.995]]] } }) };
+      return { stdout: JSON.stringify({ wgs84Extent: { coordinates: [[[-1.89, 52.995], [-1.89, 52.975], [-1.86, 52.975], [-1.86, 52.995], [-1.89, 52.995]]] } }) };
     }
   });
   assert.equal(result.method, "embedded-geospatial");
   assert.equal(result.directAuthority, true);
+  assert.equal(result.points[0].x, 0);
+  assert.equal(result.points[1].y, 800);
   assert.equal(calls, 1);
 });
 
