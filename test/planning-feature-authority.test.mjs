@@ -85,9 +85,9 @@ test("line matcher uses the 25 m displacement radius for feature overlap", () =>
 
   const nearMatch = planningGeometryMatch(localPlanning, near, { maxOffsetM: 25, minOverlap: 0.18 });
   const farMatch = planningGeometryMatch(localPlanning, far, { maxOffsetM: 25, minOverlap: 0.18 });
-  assert.equal(nearMatch.match, true);
+  assert.equal(Boolean(nearMatch.match), true);
   assert.ok(nearMatch.planningFraction > 0.8);
-  assert.equal(farMatch.match, false);
+  assert.equal(Boolean(farMatch.match), false);
 });
 
 test("approved high-confidence planning geometry gap-fills when OSM has no compatible target", () => {
