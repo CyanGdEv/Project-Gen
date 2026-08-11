@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { choosePlanningRasterDpi, parsePdfPageSize } from "../src/planning/native-workers.mjs";
+import { choosePlanningRasterDpi, parsePdfPageSize, scalePlanningPixelThreshold } from "../src/planning/native-workers.mjs";
 
 test("PDF page-size parser reads numbered Poppler page dimensions", () => {
   const parsed = parsePdfPageSize("Pages: 1\nPage 1 size: 2383.94 x 1683.78 pts (A1)\n", 1);
@@ -17,4 +17,10 @@ test("adaptive raster keeps small plans at requested DPI and caps A1/A0 pixel co
 test("adaptive raster falls back below 240 DPI when page size metadata is unavailable", () => {
   assert.equal(choosePlanningRasterDpi(240, null), 180);
   assert.equal(choosePlanningRasterDpi(150, null), 150);
+});
+
+test("semantic pixel thresholds preserve their physical radius after adaptive downsampling", () => {
+  assert.equal(scalePlanningPixelThreshold(120, { requestedDpi: 240, dpi: 240 }), 120);
+  assert.equal(scalePlanningPixelThreshold(120, { requestedDpi: 240, dpi: 120 }), 60);
+  assert.equal(scalePlanningPixelThreshold(120, { requestedDpi: 240, dpi: 180 }), 90);
 });
