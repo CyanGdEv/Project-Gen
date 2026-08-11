@@ -35,9 +35,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv gdal-bin
       - name: Build pinned Alton planning manifest
-        run: node benchmark/alton-planning-subset.mjs benchmark/alton-planning-subset
+        run: |
+          node benchmark/alton-planning-subset.mjs benchmark/alton-planning-subset
+          mkdir -p benchmark/alton-planning-subset/files
+      - name: Restore verified planning evidence from prior benchmark attempts
+        uses: actions/cache/restore@v4
+        with:
+          path: benchmark/alton-planning-subset/files
+          key: alton-planning-docs-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            alton-planning-docs-${{ runner.os }}-
       - name: Hydrate real planning documents with manifest verification
-        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000
+        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000 --attempt-timeout-ms 20000 --retries 4 --retry-delay-ms 1500
+      - name: Save verified planning evidence for later benchmark attempts
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: benchmark/alton-planning-subset/files
+          key: alton-planning-docs-${{ runner.os }}-${{ github.run_id }}
       - name: Cold planning pass
         run: |
           rm -rf .alton-benchmark-cache benchmark-output/cold benchmark-output/warm
