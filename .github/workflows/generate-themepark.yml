@@ -1,0 +1,338 @@
+name: Generate Themepark
+run-name: Generate Themepark — ${{ inputs.preset || 'workflow validation' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: Theme park to generate
+        required: true
+        default: alton-towers
+        type: choice
+        options:
+          - alton-towers
+          - chessington
+          - thorpe-park
+      accuracy:
+        description: Generation accuracy profile
+        required: true
+        default: benchmark
+        type: choice
+        options:
+          - benchmark
+          - verified
+  pull_request:
+    paths:
+      - ".github/workflows/generate-themepark.yml"
+      - "scripts/publish-mcworld-release.sh"
+      - "scripts/validate-mcworld.sh"
+      - "scripts/run-planning-pass.mjs"
+      - "benchmark/alton-planning-subset.mjs"
+      - "benchmark/normalize-alton-planning-corpus.mjs"
+      - "src/planning/**"
+      - "src/sources/**"
+      - "package.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-gen-themepark-${{ github.ref }}-${{ inputs.preset || 'validate' }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_GEN_COMPILER_REPOSITORY: CyanGdEv/Voxel-Mapping-Engine-
+  PROJECT_GEN_COMPILER_SHA: 3564d8099f740ae6c1936053e90f765faca8f9b9
+
+jobs:
+  validate-action:
+    name: Validate Generate Themepark action
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install native regression dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-opencv
+          python3 -c 'import cv2; print(cv2.__version__)'
+      - name: Validate Project Gen entrypoints
+        run: |
+          npm run check
+          bash -n scripts/publish-mcworld-release.sh
+          bash -n scripts/validate-mcworld.sh
+      - name: Run Project Gen regression suite
+        run: npm test
+
+  generate:
+    name: Generate ${{ inputs.preset }} Bedrock world
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    env:
+      TPMAP_CONTACT: ${{ vars.TPMAP_CONTACT || format('https://github.com/{0}', github.repository) }}
+      TPMAP_PRESET: ${{ inputs.preset }}
+      TPMAP_PARK_NAME: ""
+      TPMAP_BBOX: ""
+      TPMAP_ACCURACY: ${{ inputs.accuracy }}
+      TPMAP_WORLD_MARGIN: "32"
+      TPMAP_ENGLAND_OPEN_DATA: "true"
+      TPMAP_PLANNING_DOCUMENT_MODE: "off"
+      TPMAP_PLANNING_DOCUMENT_MAX_APPLICATIONS: "300"
+      TPMAP_PLANNING_DOCUMENT_MAX_DOCUMENTS: "1200"
+      TPMAP_PLANNING_DOCUMENT_MAX_MB: "150"
+      TPMAP_PLANNING_DOCUMENT_MAX_PAGES: "12"
+      TPMAP_PLANNING_DOCUMENT_MIN_SCORE: "25"
+      TPMAP_PLANNING_DOCUMENT_LICENSE: ""
+      TPMAP_PLANNING_PREFETCH_DIR: ""
+      TPMAP_PLANNING_OVERRIDE_MODE: "gated"
+      TPMAP_PLANNING_GEOMETRY_PATH: ""
+      TPMAP_PLANNING_OVERRIDE_MIN_CONFIDENCE: "0.86"
+      TPMAP_PLANNING_OVERRIDE_MIN_OVERLAP: "0.18"
+      TPMAP_PLANNING_OVERRIDE_MAX_OFFSET_M: "25"
+      TPMAP_MICROSOFT_BUILDINGS: "true"
+      TPMAP_WIKIDATA_PLACES: "true"
+      TPMAP_WIKIMEDIA_COMMONS: "false"
+      TPMAP_OPEN_AERIAL_MAP: "true"
+      TPMAP_STRICT_SUPPLEMENTAL_SOURCES: "false"
+      TPMAP_SOURCE_CONFIG_PATH: ""
+      TPMAP_OS_OPENMAP_LOCAL_PATH: ""
+      TPMAP_ORTHOPHOTO_URL: ""
+      TPMAP_ORTHOPHOTO_SOURCE: ""
+      TPMAP_ORTHOPHOTO_LICENSE: ""
+      TPMAP_ORTHOPHOTO_DATE: ""
+      TPMAP_ORTHOPHOTO_SHA256: ""
+      TPMAP_MAX_SUPPLEMENTAL_FEATURES: "50000"
+      TPMAP_SUPPLEMENTAL_PAGE_SIZE: "5000"
+      TPMAP_MAX_SUPPLEMENTAL_DOWNLOAD_MB: "250"
+      NODE_OPTIONS: --max-old-space-size=6144
+      npm_config_audit: "false"
+      npm_config_fund: "false"
+      npm_config_registry: "https://registry.npmjs.org/"
+
+    steps:
+      - name: Check out Project Gen
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install native planning and Bedrock build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gdal-bin unzip poppler-utils python3-opencv tesseract-ocr
+          python3 -c 'import cv2; print(cv2.__version__)'
+
+      - name: Build Alton planning manifest
+        if: ${{ inputs.preset == 'alton-towers' }}
+        shell: bash
+        run: |
+          node benchmark/alton-planning-subset.mjs benchmark/alton-planning-subset
+          node benchmark/normalize-alton-planning-corpus.mjs benchmark/alton-planning-subset
+          mkdir -p benchmark/alton-planning-subset/files generation-output/planning
+
+      - name: Restore verified Alton planning documents
+        if: ${{ inputs.preset == 'alton-towers' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: benchmark/alton-planning-subset/files
+          key: project-gen-alton-planning-docs-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            project-gen-alton-planning-docs-v1-${{ runner.os }}-
+
+      - name: Hydrate verified Alton planning evidence
+        if: ${{ inputs.preset == 'alton-towers' }}
+        shell: bash
+        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000 --retries 4 --retry-delay-ms 1500
+
+      - name: Save verified Alton planning documents
+        if: ${{ inputs.preset == 'alton-towers' && always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: benchmark/alton-planning-subset/files
+          key: project-gen-alton-planning-docs-v1-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Restore Project Gen planning and source caches
+        if: ${{ inputs.preset == 'alton-towers' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .themepark-planning-cache
+            .themepark-source-cache
+          key: project-gen-alton-derived-v2-${{ runner.os }}-${{ hashFiles('src/planning/**', 'src/sources/**', 'benchmark/alton-planning-subset.mjs', 'benchmark/normalize-alton-planning-corpus.mjs') }}
+          restore-keys: |
+            project-gen-alton-derived-v2-${{ runner.os }}-
+
+      - name: Run Project Gen planning authority pass
+        id: planning
+        if: ${{ inputs.preset == 'alton-towers' }}
+        shell: bash
+        run: |
+          rm -rf generation-output/planning
+          npm run planning:run -- \
+            --planning-dir benchmark/alton-planning-subset \
+            --bbox 52.9810,-1.8970,52.9960,-1.8690 \
+            --output generation-output/planning \
+            --cache .themepark-planning-cache \
+            --source-cache .themepark-source-cache \
+            --max-documents 16 \
+            --max-pages 12 \
+            --concurrency 4 \
+            --dpi 240
+          test -s generation-output/planning/planning-authority.geojson
+          test -s generation-output/planning/planning-pass-report.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const geo = JSON.parse(fs.readFileSync('generation-output/planning/planning-authority.geojson'));
+          const report = JSON.parse(fs.readFileSync('generation-output/planning/planning-pass-report.json'));
+          if (report.status !== 'complete') throw new Error(`planning pass status is ${report.status}`);
+          if (!Array.isArray(geo.features) || geo.features.length === 0) throw new Error('planning authority pass produced no world features');
+          const rideLayouts = geo.features.filter(f => (f.properties?.semanticClass || f.properties?.class || f.properties?.featureClass) === 'ride-layout').length;
+          console.log(JSON.stringify({ features: geo.features.length, rideLayouts, timings: report.timings, osm: report.osm }));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `features=${geo.features.length}\nride_layouts=${rideLayouts}\nplanning_ms=${report.timings?.planningMs || 0}\n`);
+          NODE
+
+      - name: Save Project Gen planning and source caches
+        if: ${{ inputs.preset == 'alton-towers' && always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .themepark-planning-cache
+            .themepark-source-cache
+          key: project-gen-alton-derived-v2-${{ runner.os }}-${{ hashFiles('src/planning/**', 'src/sources/**', 'benchmark/alton-planning-subset.mjs', 'benchmark/normalize-alton-planning-corpus.mjs') }}-${{ github.run_id }}
+
+      - name: Pin Project Gen planning output for compiler
+        if: ${{ inputs.preset == 'alton-towers' }}
+        shell: bash
+        run: |
+          printf 'TPMAP_PLANNING_GEOMETRY_PATH=%s\n' "$GITHUB_WORKSPACE/generation-output/planning/planning-authority.geojson" >> "$GITHUB_ENV"
+          printf 'TPMAP_PLANNING_PREFETCH_DIR=%s\n' "$GITHUB_WORKSPACE/benchmark/alton-planning-subset" >> "$GITHUB_ENV"
+
+      - name: Check out pinned Bedrock compiler bridge
+        uses: actions/checkout@v4
+        with:
+          repository: CyanGdEv/Voxel-Mapping-Engine-
+          ref: 3564d8099f740ae6c1936053e90f765faca8f9b9
+          path: vme-compiler
+          persist-credentials: false
+
+      - name: Verify compiler provenance
+        shell: bash
+        run: |
+          actual="$(git -C vme-compiler rev-parse HEAD)"
+          test "$actual" = "$PROJECT_GEN_COMPILER_SHA"
+          printf 'Pinned Bedrock compiler: %s@%s\n' "$PROJECT_GEN_COMPILER_REPOSITORY" "$actual"
+
+      - name: Generate and validate Bedrock world
+        id: build
+        working-directory: vme-compiler
+        shell: bash
+        run: |
+          cat scripts/build-themepark-world-v0120-direct.sh.part-* > "$RUNNER_TEMP/project-gen-bedrock-compiler.sh"
+          chmod +x "$RUNNER_TEMP/project-gen-bedrock-compiler.sh"
+          bash "$RUNNER_TEMP/project-gen-bedrock-compiler.sh"
+
+      - name: Normalize generated world into Project Gen output
+        id: world
+        shell: bash
+        env:
+          COMPILER_WORLD: ${{ steps.build.outputs.mcworld }}
+        run: |
+          if [[ -z "$COMPILER_WORLD" ]]; then
+            echo 'Bedrock compiler did not publish an mcworld output path' >&2
+            exit 1
+          fi
+          if [[ -f "$COMPILER_WORLD" ]]; then
+            source_world="$COMPILER_WORLD"
+          elif [[ -f "vme-compiler/$COMPILER_WORLD" ]]; then
+            source_world="vme-compiler/$COMPILER_WORLD"
+          else
+            echo "Generated world path not found: $COMPILER_WORLD" >&2
+            exit 1
+          fi
+          mkdir -p generation-output/world
+          final_world="generation-output/world/ProjectGen-${{ inputs.preset }}-${GITHUB_RUN_NUMBER}.mcworld"
+          cp "$source_world" "$final_world"
+          printf 'mcworld=%s\n' "$final_world" >> "$GITHUB_OUTPUT"
+
+      - name: Final Project Gen mcworld validation
+        id: validate_world
+        shell: bash
+        run: |
+          bash scripts/validate-mcworld.sh "${{ steps.world.outputs.mcworld }}" | tee generation-output/world/validation.txt
+          printf 'sha256=%s\n' "$(sha256sum "${{ steps.world.outputs.mcworld }}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          printf 'bytes=%s\n' "$(stat -c '%s' "${{ steps.world.outputs.mcworld }}")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish direct .mcworld download
+        id: publish_world
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-mcworld-release.sh "${{ steps.world.outputs.mcworld }}" "${{ inputs.preset }}"
+
+      - name: Write Generate Themepark summary
+        if: always()
+        shell: bash
+        env:
+          SUMMARY_PRESET: ${{ inputs.preset }}
+          SUMMARY_ACCURACY: ${{ inputs.accuracy }}
+          SUMMARY_DOWNLOAD_URL: ${{ steps.publish_world.outputs.download_url || '' }}
+          SUMMARY_WORLD: ${{ steps.world.outputs.mcworld || '' }}
+          SUMMARY_SHA256: ${{ steps.validate_world.outputs.sha256 || '' }}
+          SUMMARY_BYTES: ${{ steps.validate_world.outputs.bytes || '' }}
+          SUMMARY_PLANNING_FEATURES: ${{ steps.planning.outputs.features || '0' }}
+          SUMMARY_RIDE_LAYOUTS: ${{ steps.planning.outputs.ride_layouts || '0' }}
+          SUMMARY_PLANNING_MS: ${{ steps.planning.outputs.planning_ms || '0' }}
+          SUMMARY_STRATEGY: ${{ steps.build.outputs.strategy || 'none' }}
+        run: |
+          {
+            printf '%s\n' '# Project Gen — Generate Themepark'
+            printf '\n'
+            printf '%s\n' "- Park: ${SUMMARY_PRESET}"
+            printf '%s\n' "- Accuracy: ${SUMMARY_ACCURACY}"
+            printf '%s\n' "- Project Gen commit: ${GITHUB_SHA}"
+            printf '%s\n' "- Bedrock compiler bridge: ${PROJECT_GEN_COMPILER_REPOSITORY}@${PROJECT_GEN_COMPILER_SHA}"
+            printf '%s\n' "- Compiler strategy: ${SUMMARY_STRATEGY}"
+            if [[ "$SUMMARY_PRESET" == 'alton-towers' ]]; then
+              printf '%s\n' "- Planning-authoritative features: ${SUMMARY_PLANNING_FEATURES}"
+              printf '%s\n' "- Planning ride-layout features: ${SUMMARY_RIDE_LAYOUTS}"
+              printf '%s\n' "- Project Gen planning time: ${SUMMARY_PLANNING_MS} ms"
+              printf '%s\n' '- OSM role: registration/reference only; Project Gen planning GeoJSON is passed to the Bedrock compiler as planning geometry.'
+            else
+              printf '%s\n' '- Project Gen planning corpus: not yet configured for this preset; compiler fallback sources are used.'
+            fi
+            if [[ -n "$SUMMARY_WORLD" && -f "$SUMMARY_WORLD" ]]; then
+              printf '\n%s\n' '## Generated world'
+              printf '%s\n' "- File: $(basename "$SUMMARY_WORLD")"
+              printf '%s\n' "- Bytes: ${SUMMARY_BYTES}"
+              printf '%s\n' "- SHA-256: ${SUMMARY_SHA256}"
+              if [[ -n "$SUMMARY_DOWNLOAD_URL" ]]; then
+                printf '%s\n' "- Direct download: [$(basename "$SUMMARY_WORLD")](${SUMMARY_DOWNLOAD_URL})"
+                printf '%s\n' '- The world is a raw `.mcworld` Release asset, not nested inside an Actions artifact ZIP.'
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload generation diagnostics only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-gen-themepark-diagnostics-${{ inputs.preset }}
+          path: |
+            generation-output/planning/planning-pass-report.json
+            generation-output/planning/planning-authority.geojson
+            generation-output/world/validation.txt
+            vme-compiler/ci-diagnostics/**
+          if-no-files-found: warn
+          retention-days: 14

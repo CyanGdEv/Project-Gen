@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { FileArtifactCache } from "../src/cache.mjs";
-import { assertReferenceSourceParity, REFERENCE_SOURCE_IDS, SOURCE_CATALOG } from "../src/source-catalog.mjs";
+import { assertReferenceSourceParity, REFERENCE_SOURCE_IDS, SOURCE_CATALOG, worldRenderableSourceIds } from "../src/source-catalog.mjs";
 import { acquireSources } from "../src/source-runtime.mjs";
 import { createHttpJsonAdapter } from "../src/sources/http-json.mjs";
 import { buildThemeParkOverpassQuery, createOsmOverpassAdapter, normalizeBbox } from "../src/sources/osm-overpass.mjs";
@@ -202,9 +202,12 @@ test("source runtime runs planning and remote adapters concurrently and supports
   }
 });
 
-test("source catalog retains Mapping Engine provider families with planning as primary authority", () => {
+test("source catalog retains provider parity while forbidding OSM world rendering", () => {
   assert.equal(SOURCE_CATALOG.planning.role, "primary-geometry-material-authority");
-  assert.equal(SOURCE_CATALOG.osm.role, "placement-context-gap-fill");
+  assert.equal(SOURCE_CATALOG.planning.worldRenderable, true);
+  assert.equal(SOURCE_CATALOG.osm.role, "registration-placement-reference-only-never-rendered");
+  assert.equal(SOURCE_CATALOG.osm.worldRenderable, false);
+  assert.equal(worldRenderableSourceIds().includes("osm"), false);
   assert.equal(assertReferenceSourceParity(REFERENCE_SOURCE_IDS).complete, true);
 });
 

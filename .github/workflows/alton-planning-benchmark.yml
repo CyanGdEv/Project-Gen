@@ -1,0 +1,140 @@
+name: Alton Planning Benchmark
+
+on:
+  pull_request:
+    paths:
+      - "src/planning/prefetch-hydrate.mjs"
+      - "src/planning/native-workers.mjs"
+      - "src/planning/fast-path.mjs"
+      - "src/planning/prefetch-runner.mjs"
+      - "src/planning/pdf-text-semantics.mjs"
+      - "src/planning/profiler.mjs"
+      - "src/planning/strong-georeference.mjs"
+      - "src/planning/reference-raster.mjs"
+      - "src/sources/planning-prefetch.mjs"
+      - "src/sources/osm-overpass.mjs"
+      - "src/sources/http-json.mjs"
+      - "scripts/hydrate-planning-prefetch.mjs"
+      - "scripts/run-planning-pass.mjs"
+      - "benchmark/alton-planning-subset.mjs"
+      - "benchmark/normalize-alton-planning-corpus.mjs"
+      - ".github/workflows/alton-planning-benchmark.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-alton-planning:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install native planning tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv gdal-bin
+      - name: Build pinned geometry-first Alton planning manifest
+        run: |
+          node benchmark/alton-planning-subset.mjs benchmark/alton-planning-subset
+          node benchmark/normalize-alton-planning-corpus.mjs benchmark/alton-planning-subset
+          mkdir -p benchmark/alton-planning-subset/files
+      - name: Restore verified planning evidence from prior benchmark attempts
+        uses: actions/cache/restore@v4
+        with:
+          path: benchmark/alton-planning-subset/files
+          key: alton-planning-docs-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            alton-planning-docs-${{ runner.os }}-
+      - name: Hydrate real planning documents with manifest verification
+        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000 --retries 4 --retry-delay-ms 1500
+      - name: Save verified planning evidence for later benchmark attempts
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: benchmark/alton-planning-subset/files
+          key: alton-planning-docs-${{ runner.os }}-${{ github.run_id }}
+      - name: Restore resilient OSM reference cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .alton-source-cache
+          key: alton-osm-reference-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            alton-osm-reference-v1-${{ runner.os }}-
+      - name: Cold planning pass
+        run: |
+          rm -rf .alton-benchmark-cache benchmark-output/cold benchmark-output/warm
+          npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/cold --cache .alton-benchmark-cache --source-cache .alton-source-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
+      - name: Save resilient OSM reference cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .alton-source-cache
+          key: alton-osm-reference-v1-${{ runner.os }}-${{ github.run_id }}
+      - name: Publish cold planning profile
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const cold = JSON.parse(fs.readFileSync('benchmark-output/cold/planning-pass-report.json'));
+          const profile = {
+            timings: cold.timings,
+            withinFiveMinuteTarget: cold.withinFiveMinuteTarget,
+            processedDocuments: cold.planning.processedDocuments,
+            candidateAcceptedDocuments: cold.planning.candidateAcceptedDocuments,
+            authorityAcceptedDocuments: cold.planning.acceptedDocuments,
+            features: cold.planning.features,
+            cacheAndWorkers: cold.planning.metrics,
+            authorityGate: cold.planning.authorityGate,
+            osm: cold.osm
+          };
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Cold Alton planning profile\n\n\`\`\`json\n${JSON.stringify(profile, null, 2)}\n\`\`\`\n`);
+          console.log(JSON.stringify(profile));
+          NODE
+      - name: Preserve cold planning result
+        uses: actions/upload-artifact@v4
+        with:
+          name: alton-planning-benchmark-cold
+          path: |
+            benchmark-output/cold/planning-pass-report.json
+            benchmark-output/cold/planning-authority.geojson
+          if-no-files-found: error
+          retention-days: 7
+      - name: Warm planning pass
+        run: npm run planning:run -- --planning-dir benchmark/alton-planning-subset --bbox 52.9810,-1.8970,52.9960,-1.8690 --output benchmark-output/warm --cache .alton-benchmark-cache --source-cache .alton-source-cache --max-documents 16 --max-pages 12 --concurrency 4 --dpi 240
+      - name: Publish benchmark summary
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const cold = JSON.parse(fs.readFileSync('benchmark-output/cold/planning-pass-report.json'));
+          const warm = JSON.parse(fs.readFileSync('benchmark-output/warm/planning-pass-report.json'));
+          const summary = {
+            evidence: { documents: 16, bbox: cold.bbox },
+            cold: cold.timings,
+            warm: warm.timings,
+            speedup: cold.timings.totalMs / Math.max(1, warm.timings.totalMs),
+            candidateAcceptedDocuments: { cold: cold.planning.candidateAcceptedDocuments, warm: warm.planning.candidateAcceptedDocuments },
+            authorityAcceptedDocuments: { cold: cold.planning.acceptedDocuments, warm: warm.planning.acceptedDocuments },
+            features: { cold: cold.planning.features, warm: warm.planning.features },
+            cache: { cold: cold.planning.metrics, warm: warm.planning.metrics },
+            authorityGate: { cold: cold.planning.authorityGate, warm: warm.planning.authorityGate },
+            osm: { cold: cold.osm, warm: warm.osm },
+            withinFiveMinuteTarget: { cold: cold.withinFiveMinuteTarget, warm: warm.withinFiveMinuteTarget }
+          };
+          fs.writeFileSync('benchmark-output/benchmark-summary.json', JSON.stringify(summary, null, 2));
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Real Alton planning benchmark\n\n\`\`\`json\n${JSON.stringify(summary, null, 2)}\n\`\`\`\n`);
+          console.log(JSON.stringify(summary));
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alton-planning-benchmark
+          path: |
+            benchmark-output/benchmark-summary.json
+            benchmark-output/cold/planning-pass-report.json
+            benchmark-output/warm/planning-pass-report.json
+            benchmark-output/cold/planning-authority.geojson
+            benchmark-output/warm/planning-authority.geojson
+          if-no-files-found: error
+          retention-days: 7

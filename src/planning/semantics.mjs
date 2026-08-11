@@ -34,8 +34,34 @@ function unionBounds(words) {
   return { left, top, width: right - left, height: bottom - top, centerX: (left + right) / 2, centerY: (top + bottom) / 2 };
 }
 
+function semanticResult(lineGroups, rawForEmptyHash = "") {
+  const anchors = [];
+  const lineRecords = [];
+  const allText = [];
+  for (const [lineId, words] of lineGroups) {
+    if (!words.length) continue;
+    const text = words.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    const confidence = words.reduce((total, word) => total + number(word.confidence, 1), 0) / words.length;
+    const bounds = unionBounds(words);
+    allText.push(text);
+    lineRecords.push({ lineId, text, confidence, bounds });
+    const role = classifyPlanningSemanticLabel(text);
+    if (role) anchors.push({ lineId, role, text, confidence, bounds });
+  }
+  const normalizedText = allText.join("\n");
+  return {
+    anchors,
+    lines: lineRecords,
+    text: normalizedText,
+    sha256: createHash("sha256").update(normalizedText || String(rawForEmptyHash || "")).digest("hex")
+  };
+}
+
 export function extractSemanticAnchorsFromTsv(tsv, options = {}) {
   const minConfidence = number(options.minConfidence, 35);
+  const scaleX = Math.max(0.000001, number(options.coordinateScaleX, 1));
+  const scaleY = Math.max(0.000001, number(options.coordinateScaleY, 1));
   const lines = String(tsv || "").split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return { anchors: [], lines: [], text: "", sha256: createHash("sha256").update(String(tsv || "")).digest("hex") };
   const header = lines[0].split("\t");
@@ -47,42 +73,85 @@ export function extractSemanticAnchorsFromTsv(tsv, options = {}) {
   for (const line of lines.slice(1)) {
     const values = line.split("\t");
     const text = String(values[index.text] || "").trim();
-    const confidence = number(values[index.conf], -1);
-    if (!text || confidence < minConfidence) continue;
+    const rawConfidence = number(values[index.conf], -1);
+    if (!text || rawConfidence < minConfidence) continue;
     const word = {
       text,
-      confidence,
-      left: number(values[index.left]),
-      top: number(values[index.top]),
-      width: number(values[index.width]),
-      height: number(values[index.height])
+      confidence: rawConfidence / 100,
+      left: number(values[index.left]) * scaleX,
+      top: number(values[index.top]) * scaleY,
+      width: number(values[index.width]) * scaleX,
+      height: number(values[index.height]) * scaleY
     };
     const key = [values[index.page_num], values[index.block_num], values[index.par_num], values[index.line_num]].join(":");
     const group = groups.get(key) || [];
     group.push(word);
     groups.set(key, group);
   }
+  return semanticResult(groups, tsv);
+}
 
-  const anchors = [];
-  const lineRecords = [];
-  const allText = [];
-  for (const [lineId, words] of groups) {
-    const text = words.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim();
-    const confidence = words.reduce((total, word) => total + word.confidence, 0) / words.length / 100;
-    const bounds = unionBounds(words);
-    allText.push(text);
-    lineRecords.push({ lineId, text, confidence, bounds });
-    const role = classifyPlanningSemanticLabel(text);
-    if (!role) continue;
-    anchors.push({ lineId, role, text, confidence, bounds });
+function decodeXml(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
+}
+
+function attributes(source) {
+  const result = {};
+  for (const match of String(source || "").matchAll(/([A-Za-z_:][\w:.-]*)\s*=\s*"([^"]*)"/g)) result[match[1]] = match[2];
+  return result;
+}
+
+export function extractSemanticAnchorsFromPopplerBbox(xhtml, render, options = {}) {
+  const source = String(xhtml || "");
+  const pageMatch = source.match(/<page\b([^>]*)>/i);
+  if (!pageMatch) return { anchors: [], lines: [], text: "", sha256: createHash("sha256").update(source).digest("hex"), wordCount: 0 };
+  const pageAttrs = attributes(pageMatch[1]);
+  const pageWidth = number(pageAttrs.width, 0);
+  const pageHeight = number(pageAttrs.height, 0);
+  if (!(pageWidth > 0 && pageHeight > 0 && Number(render?.width) > 0 && Number(render?.height) > 0)) {
+    return { anchors: [], lines: [], text: "", sha256: createHash("sha256").update(source).digest("hex"), wordCount: 0 };
   }
-  const normalizedText = allText.join("\n");
-  return {
-    anchors,
-    lines: lineRecords,
-    text: normalizedText,
-    sha256: createHash("sha256").update(normalizedText).digest("hex")
-  };
+  const scaleX = Number(render.width) / pageWidth;
+  const scaleY = Number(render.height) / pageHeight;
+  const groups = new Map();
+  let lineIndex = 0;
+  let wordCount = 0;
+  for (const lineMatch of source.matchAll(/<line\b[^>]*>([\s\S]*?)<\/line>/gi)) {
+    const words = [];
+    for (const wordMatch of lineMatch[1].matchAll(/<word\b([^>]*)>([\s\S]*?)<\/word>/gi)) {
+      const attrs = attributes(wordMatch[1]);
+      const text = decodeXml(wordMatch[2].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+      const xMin = number(attrs.xMin, NaN), yMin = number(attrs.yMin, NaN), xMax = number(attrs.xMax, NaN), yMax = number(attrs.yMax, NaN);
+      if (!text || ![xMin, yMin, xMax, yMax].every(Number.isFinite) || xMax < xMin || yMax < yMin) continue;
+      wordCount += 1;
+      words.push({
+        text,
+        confidence: 1,
+        left: xMin * scaleX,
+        top: yMin * scaleY,
+        width: (xMax - xMin) * scaleX,
+        height: (yMax - yMin) * scaleY
+      });
+    }
+    if (words.length) groups.set(`pdf:${lineIndex++}`, words);
+  }
+  const result = semanticResult(groups, source);
+  return { ...result, wordCount, pageWidth, pageHeight, coordinateScaleX: scaleX, coordinateScaleY: scaleY };
+}
+
+export function semanticTextIsUseful(semantics, options = {}) {
+  const minWords = Math.max(1, number(options.minWords, 5));
+  const minChars = Math.max(1, number(options.minChars, 32));
+  const text = String(semantics?.text || "").trim();
+  const words = number(semantics?.wordCount, text ? text.split(/\s+/).filter(Boolean).length : 0);
+  return words >= minWords && text.length >= minChars;
 }
 
 function candidateBounds(candidate) {

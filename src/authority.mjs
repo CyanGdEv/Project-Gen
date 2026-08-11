@@ -50,6 +50,12 @@ function confidence(feature) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function planningWorldAuthorityEligible(feature) {
+  if (sourceName(feature) !== "planning") return false;
+  const explicit = feature?.properties?.planningWorldAuthorityEligible ?? feature?.properties?.planning_world_authority_eligible;
+  return explicit === undefined || explicit === null ? true : explicit === true;
+}
+
 function rank(feature) {
   return SOURCE_RANK[sourceName(feature)] ?? DEFAULT_SOURCE_RANK;
 }
@@ -79,16 +85,21 @@ export function resolveEvidence(features) {
 
   for (const [key, candidates] of groups) {
     const clazz = featureClass(candidates[0].feature);
-    const planning = candidates.filter(({ feature }) => sourceName(feature) === "planning");
-    const pool = PLANNING_LOCKED_CLASSES.has(clazz) && planning.length ? planning : candidates;
-    const sorted = [...pool].sort(stableWinner);
+    const planningEvidence = candidates.filter(({ feature }) => sourceName(feature) === "planning");
+    const eligiblePlanning = planningEvidence.filter(({ feature }) => planningWorldAuthorityEligible(feature));
+    const planningLock = PLANNING_LOCKED_CLASSES.has(clazz) && eligiblePlanning.length > 0;
+    const pool = planningLock ? eligiblePlanning : candidates.filter(({ feature }) => sourceName(feature) !== "planning" || planningWorldAuthorityEligible(feature));
+    const effectivePool = pool.length ? pool : candidates;
+    const sorted = [...effectivePool].sort(stableWinner);
     const winner = sorted[0];
     winners.push(winner.feature);
     decisions.push({
       authorityKey: key,
       featureClass: clazz,
       winnerSource: sourceName(winner.feature),
-      planningLocked: PLANNING_LOCKED_CLASSES.has(clazz) && planning.length > 0,
+      planningLocked: planningLock,
+      planningEvidenceCount: planningEvidence.length,
+      eligiblePlanningCount: eligiblePlanning.length,
       candidateCount: candidates.length
     });
   }
@@ -109,10 +120,12 @@ export function assertPlanningAuthority(features, result = resolveEvidence(featu
   for (const decision of result.decisions) {
     if (!PLANNING_LOCKED_CLASSES.has(decision.featureClass)) continue;
     const group = candidateGroups.get(decision.authorityKey) || [];
-    const hasPlanning = group.some((feature) => sourceName(feature) === "planning");
-    if (hasPlanning && decision.winnerSource !== "planning") {
+    const hasEligiblePlanning = group.some((feature) => planningWorldAuthorityEligible(feature));
+    if (hasEligiblePlanning && decision.winnerSource !== "planning") {
       throw new Error(`planning authority violated for ${decision.authorityKey}`);
     }
   }
   return true;
 }
+
+export { planningWorldAuthorityEligible };

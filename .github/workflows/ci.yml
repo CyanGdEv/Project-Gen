@@ -19,8 +19,8 @@ jobs:
           node-version: "22"
       - name: Install native planning tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv gdal-bin
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv gdal-bin
           pdftoppm -v
           tesseract --version | head -n 1
           gdalinfo --version
@@ -32,4 +32,25 @@ jobs:
           python3 -m py_compile src/planning/planning_auto_register.py
           python3 -m py_compile src/planning/planning_reference.py
           npm run worker:self-test
-      - run: npm test
+      - name: Run Node regression suite
+        id: node_tests
+        run: |
+          set +e
+          npm test > /tmp/project-gen-node-test.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Node regression failure tail"
+            tail -n 180 /tmp/project-gen-node-test.log
+            echo "::endgroup::"
+            exit "$status"
+          fi
+          tail -n 40 /tmp/project-gen-node-test.log
+      - name: Upload Node regression log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-gen-node-regression-log
+          path: /tmp/project-gen-node-test.log
+          if-no-files-found: ignore
+          retention-days: 2

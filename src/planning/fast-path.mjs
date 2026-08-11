@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { automaticConsensusGroups, registrationVariantScore } from "./georeference.mjs";
+import { applyPlanningFeatureAuthority } from "./osm-feature-authority.mjs";
 import { planningRegistrationKey, planningRenderKey, planningSemanticKey, planningStrongGeoreferenceKey, planningVectorKey } from "./cache-keys.mjs";
 import { normalizePlanningVectors } from "./vectorize.mjs";
 
@@ -10,11 +11,17 @@ function hashJson(value) {
 async function mapConcurrent(items, concurrency, worker) {
   const output = new Array(items.length);
   let next = 0;
+  let stopped = false;
   async function run() {
-    while (true) {
+    while (!stopped) {
       const index = next++;
       if (index >= items.length) return;
-      output[index] = await worker(items[index], index);
+      try {
+        output[index] = await worker(items[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) }, run));
@@ -65,6 +72,13 @@ function bestPageCandidate(pages) {
     })[0] || null;
 }
 
+function recordFailure(metrics, stage, error) {
+  metrics.pageFailures += 1;
+  metrics.pageFailureStages[stage] = Number(metrics.pageFailureStages[stage] || 0) + 1;
+  const code = String(error?.code || "unknown");
+  metrics.pageFailureCodes[code] = Number(metrics.pageFailureCodes[code] || 0) + 1;
+}
+
 async function resolvePageRegistration({ cache, processors, document, page, render, semantics, semanticHash, referenceHash, bbox, options, metrics }) {
   if (typeof processors.resolveStrongGeoreference === "function") {
     const strongKey = planningStrongGeoreferenceKey({
@@ -110,7 +124,7 @@ async function resolvePageRegistration({ cache, processors, document, page, rend
   return { ...registration, source: "visual" };
 }
 
-export async function runPlanningFastPath({ documents, cache, processors, referenceHash = null, bbox = null, options = {} }) {
+export async function runPlanningFastPath({ documents, cache, processors, referenceHash = null, referenceFeatures = [], bbox = null, options = {} }) {
   if (!cache) throw new Error("planning fast path requires cache");
   for (const name of ["renderPage", "extractSemantics", "registerPage", "vectorizePage"]) {
     if (typeof processors?.[name] !== "function") throw new Error(`planning fast path requires processors.${name}()`);
@@ -124,8 +138,19 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     vectorHits: 0,
     documents: documents.length,
     pages: 0,
+    pageFailures: 0,
+    pageFailureStages: {},
+    pageFailureCodes: {},
+    vectorFailures: 0,
     directGeoreferences: 0,
-    consensusGeoreferences: 0
+    consensusGeoreferences: 0,
+    candidateDocuments: 0,
+    candidateFeatures: 0,
+    authorityAccepted: 0,
+    authorityRejected: 0,
+    authorityAcceptedDocuments: 0,
+    authorityRejectionReasons: {},
+    authorityActions: {}
   };
 
   const prepared = await mapConcurrent(documents, concurrency, async (document) => {
@@ -133,42 +158,60 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     const pageResults = [];
     for (const page of pages) {
       metrics.pages += 1;
-      const render = await cachedStage(cache, planningRenderKey({
-        documentSha256: document.sha256,
-        page,
-        dpi: options.dpi || 240,
-        rendererVersion: options.rendererVersion || "render-v1"
-      }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }), processors.validateRenderArtifact || null);
-      if (render.cacheHit) metrics.renderHits += 1;
-      if (!render.value?.sha256) throw new Error(`renderPage must return sha256 for ${document.id || document.sha256} page ${page}`);
+      let stage = "render";
+      try {
+        const render = await cachedStage(cache, planningRenderKey({
+          documentSha256: document.sha256,
+          page,
+          dpi: options.dpi || 240,
+          rendererVersion: options.rendererVersion || "render-v1"
+        }), () => processors.renderPage({ document, page, dpi: options.dpi || 240 }), processors.validateRenderArtifact || null);
+        if (render.cacheHit) metrics.renderHits += 1;
+        if (!render.value?.sha256) throw new Error(`renderPage must return sha256 for ${document.id || document.sha256} page ${page}`);
 
-      const semantics = await cache.getOrCreate(planningSemanticKey({
-        pageSha256: render.value.sha256,
-        extractorVersion: options.extractorVersion || "semantic-v1"
-      }), () => processors.extractSemantics({ document, page, render: render.value }));
-      if (semantics.cacheHit) metrics.semanticHits += 1;
-      const semanticHash = semantics.value?.sha256 || hashJson(semantics.value);
+        stage = "semantics";
+        const semantics = await cache.getOrCreate(planningSemanticKey({
+          pageSha256: render.value.sha256,
+          extractorVersion: options.extractorVersion || "semantic-v1"
+        }), () => processors.extractSemantics({ document, page, render: render.value }));
+        if (semantics.cacheHit) metrics.semanticHits += 1;
+        const semanticHash = semantics.value?.sha256 || hashJson(semantics.value);
 
-      const registration = await resolvePageRegistration({
-        cache,
-        processors,
-        document,
-        page,
-        render: render.value,
-        semantics: semantics.value,
-        semanticHash,
-        referenceHash,
-        bbox,
-        options,
-        metrics
-      });
-      pageResults.push({ page, render: render.value, semantics: semantics.value, semanticHash, registration: registration.value, candidate: candidateForPage(registration.value, page) });
+        stage = "registration";
+        const registration = await resolvePageRegistration({
+          cache,
+          processors,
+          document,
+          page,
+          render: render.value,
+          semantics: semantics.value,
+          semanticHash,
+          referenceHash,
+          bbox,
+          options,
+          metrics
+        });
+        pageResults.push({ page, render: render.value, semantics: semantics.value, semanticHash, registration: registration.value, candidate: candidateForPage(registration.value, page) });
+      } catch (error) {
+        if (!error?.recoverablePlanningPage || options.failOnRecoverablePageError === true) throw error;
+        recordFailure(metrics, stage, error);
+        pageResults.push({
+          page,
+          error: {
+            stage,
+            code: error?.code || null,
+            message: error?.message || String(error)
+          },
+          candidate: null
+        });
+      }
     }
     const best = bestPageCandidate(pageResults);
     return {
       id: document.id || document.sha256,
       sourceSha256: document.sha256,
       applicationReference: document.applicationReference || "unknown",
+      applicationStatus: document.applicationStatus ?? null,
       document,
       pages: pageResults,
       automaticCandidate: best?.candidate || null,
@@ -191,52 +234,114 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
 
   const consensus = automaticConsensusGroups(consensusInput, options);
   const selectedCandidates = new Map([...consensus.selectedCandidates, ...directSelected]);
-  const acceptedIds = new Set([...consensus.accepted, ...directSelected.keys()]);
+  const candidateAcceptedIds = new Set([...consensus.accepted, ...directSelected.keys()]);
   metrics.directGeoreferences = directSelected.size;
   metrics.consensusGeoreferences = consensus.accepted.size;
+  metrics.candidateDocuments = candidateAcceptedIds.size;
 
-  const acceptedDocuments = prepared.filter((entry) => acceptedIds.has(entry.id));
-  const vectorized = await mapConcurrent(acceptedDocuments, concurrency, async (entry) => {
+  // Registration establishes a defensible page-to-world transform. The Phase 18
+  // confidence/overlap/displacement/ambiguity authority gates apply to the extracted
+  // planning features against compatible reference features, not to the entire PDF.
+  const candidateDocuments = prepared.filter((entry) => candidateAcceptedIds.has(entry.id));
+  const vectorizedRaw = await mapConcurrent(candidateDocuments, concurrency, async (entry) => {
     const selectedCandidate = selectedCandidates.get(entry.id);
     const selectedPage = entry.pages.find((page) => page.page === Number(selectedCandidate?.page || entry.selectedPage))
       || entry.pages.find((page) => page.candidate === selectedCandidate)
       || entry.pages.find((page) => page.page === entry.selectedPage);
     if (!selectedPage) throw new Error(`selected georeference missing page for ${entry.id}`);
-    const transformHash = hashJson(selectedCandidate);
-    const vector = await cache.getOrCreate(planningVectorKey({
-      pageSha256: selectedPage.render.sha256,
-      semanticHash: selectedPage.semanticHash,
-      transformHash,
-      vectorizerVersion: options.vectorizerVersion || "vector-v1"
-    }), () => processors.vectorizePage({
-      document: entry.document,
-      page: selectedPage.page,
-      render: selectedPage.render,
-      semantics: selectedPage.semantics,
-      candidate: selectedCandidate,
-      bbox
-    }));
-    if (vector.cacheHit) metrics.vectorHits += 1;
-    const normalized = normalizePlanningVectors(vector.value?.vectors || vector.value || [], {
-      applicationReference: entry.applicationReference,
-      documentId: entry.id,
-      sourceSha256: entry.sourceSha256,
-      page: selectedPage.page,
-      confidence: selectedCandidate?.confidence
-    });
-    return { id: entry.id, page: selectedPage.page, candidate: selectedCandidate, ...normalized };
+    try {
+      const transformHash = hashJson(selectedCandidate);
+      const vector = await cache.getOrCreate(planningVectorKey({
+        pageSha256: selectedPage.render.sha256,
+        semanticHash: selectedPage.semanticHash,
+        transformHash,
+        vectorizerVersion: options.vectorizerVersion || "vector-v1"
+      }), () => processors.vectorizePage({
+        document: entry.document,
+        page: selectedPage.page,
+        render: selectedPage.render,
+        semantics: selectedPage.semantics,
+        candidate: selectedCandidate,
+        bbox
+      }));
+      if (vector.cacheHit) metrics.vectorHits += 1;
+      const normalized = normalizePlanningVectors(vector.value?.vectors || vector.value || [], {
+        applicationReference: entry.applicationReference,
+        applicationStatus: entry.applicationStatus,
+        documentId: entry.id,
+        sourceSha256: entry.sourceSha256,
+        page: selectedPage.page,
+        confidence: selectedCandidate?.confidence
+      });
+      return { id: entry.id, page: selectedPage.page, candidate: selectedCandidate, ...normalized };
+    } catch (error) {
+      if (!error?.recoverablePlanningPage || options.failOnRecoverablePageError === true) throw error;
+      metrics.vectorFailures += 1;
+      return null;
+    }
   });
+  const vectorizedCandidates = vectorizedRaw.filter(Boolean);
+  const candidateFeatures = vectorizedCandidates.flatMap((entry) => entry.features);
+  metrics.candidateFeatures = candidateFeatures.length;
+
+  const authority = options.enforceAuthorityGate === false
+    ? {
+        accepted: candidateFeatures.map((feature) => ({
+          ...feature,
+          properties: { ...(feature.properties || {}), planningWorldAuthority: true, planningAuthorityAction: "disabled-test-mode", osmWorldRenderable: false }
+        })),
+        evaluations: candidateFeatures.map((feature) => ({ featureId: feature.id || null, accepted: true, action: "disabled-test-mode", reasons: [] })),
+        actions: { "disabled-test-mode": candidateFeatures.length },
+        rejectionReasons: {}
+      }
+    : applyPlanningFeatureAuthority(candidateFeatures, referenceFeatures, {
+        bbox,
+        minConfidence: Number(options.planningAuthorityMinConfidence ?? 0.86),
+        minOverlap: Number(options.planningAuthorityMinOverlap ?? 0.18),
+        maxOffsetM: Number(options.planningAuthorityMaxOffsetM ?? 25),
+        toleranceM: Number(options.planningAuthorityToleranceM ?? 3),
+        allowGapFill: options.planningAuthorityAllowGapFill !== false
+      });
+
+  metrics.authorityAccepted = authority.accepted.length;
+  metrics.authorityRejected = authority.evaluations.length - authority.accepted.length;
+  metrics.authorityRejectionReasons = authority.rejectionReasons;
+  metrics.authorityActions = authority.actions;
+
+  const acceptedFeatureIds = new Set(authority.accepted.map((feature) => String(feature.id)));
+  const authorityAcceptedIds = new Set(authority.accepted.map((feature) => feature.properties?.documentId).filter(Boolean));
+  metrics.authorityAcceptedDocuments = authorityAcceptedIds.size;
+  const vectorized = vectorizedCandidates
+    .map((entry) => ({ ...entry, features: entry.features.filter((feature) => acceptedFeatureIds.has(String(feature.id))) }))
+    .filter((entry) => entry.features.length > 0);
+
+  const directAuthorityAcceptedIds = [...directSelected.keys()].filter((id) => authorityAcceptedIds.has(id));
+  const consensusAuthorityAcceptedIds = [...consensus.accepted].filter((id) => authorityAcceptedIds.has(id));
 
   return {
     documents: prepared,
     georeference: {
-      acceptedIds: [...acceptedIds].sort(),
-      directAcceptedIds: [...directSelected.keys()].sort(),
+      acceptedIds: [...authorityAcceptedIds].sort(),
+      candidateAcceptedIds: [...candidateAcceptedIds].sort(),
+      directAcceptedIds: directAuthorityAcceptedIds.sort(),
+      directCandidateIds: [...directSelected.keys()].sort(),
       consensusAcceptedIds: [...consensus.accepted].sort(),
+      consensusAuthorityAcceptedIds: consensusAuthorityAcceptedIds.sort(),
       evidence: consensus.evidence,
       minimumDocuments: consensus.minimumDocuments,
       minimumConfidence: consensus.minimumConfidence,
-      maxSeparationM: consensus.maxSeparationM
+      maxSeparationM: consensus.maxSeparationM,
+      authority: {
+        level: "planning-feature",
+        mode: "planning-authoritative-reference-validation-only",
+        minConfidence: Number(options.planningAuthorityMinConfidence ?? 0.86),
+        minOverlap: Number(options.planningAuthorityMinOverlap ?? 0.18),
+        maxOffsetM: Number(options.planningAuthorityMaxOffsetM ?? 25),
+        toleranceM: Number(options.planningAuthorityToleranceM ?? 3),
+        allowGapFill: options.planningAuthorityAllowGapFill !== false,
+        referenceWorldRenderable: false,
+        evaluations: authority.evaluations
+      }
     },
     consensus: {
       acceptedIds: [...consensus.accepted].sort(),
@@ -245,8 +350,9 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       minimumConfidence: consensus.minimumConfidence,
       maxSeparationM: consensus.maxSeparationM
     },
-    features: vectorized.flatMap((entry) => entry.features),
+    features: authority.accepted,
     vectorized,
+    vectorizedCandidates,
     metrics
   };
 }

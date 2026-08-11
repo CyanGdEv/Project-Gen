@@ -2,8 +2,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { FileArtifactCache } from "../cache.mjs";
 import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
+import { summarizePlanningEvidenceDiagnostics } from "./diagnostics.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
+import { normalizeOsmReferenceFeatures } from "./osm-feature-authority.mjs";
+import { createPlanningProcessorProfiler, createTimingAccumulator } from "./profiler.mjs";
 import { buildPlanningReference } from "./reference-raster.mjs";
 import { resolveStrongGeoreference } from "./strong-georeference.mjs";
 
@@ -35,12 +38,14 @@ function metadataIndex(manifest) {
   const byFile = new Map();
   for (const application of manifest.applications || []) {
     const applicationReference = application?.reference || application?.applicationReference || application?.application_reference || null;
+    const applicationStatus = application?.status || application?.applicationStatus || application?.application_status || "unknown";
     const appLocation = locationPrior(application);
     for (const document of application?.downloadedDocuments || application?.documents || []) {
       if (!document || typeof document !== "object") continue;
       const metadata = {
         ...document,
         applicationReference,
+        applicationStatus,
         locationPrior: locationPrior(document) || appLocation,
         explicitControlPoints: document.explicitControlPoints || document.controlPoints || document.georeference?.points || null,
         georeference: document.georeference || null
@@ -69,15 +74,28 @@ async function documentPages(document, options = {}) {
 async function mapConcurrent(items, concurrency, worker) {
   const output = new Array(items.length);
   let next = 0;
+  let stopped = false;
   async function lane() {
-    while (true) {
+    while (!stopped) {
       const index = next++;
       if (index >= items.length) return;
-      output[index] = await worker(items[index], index);
+      try {
+        output[index] = await worker(items[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(items.length || 1, Math.max(1, concurrency)) }, lane));
   return output;
+}
+
+function recoverableReferenceError(message) {
+  const error = new Error(message);
+  error.code = "PLANNING_REFERENCE_UNAVAILABLE";
+  error.recoverablePlanningPage = true;
+  return error;
 }
 
 export async function preparePrefetchDocuments(planningDirectory, ingestion, options = {}) {
@@ -101,6 +119,7 @@ export async function preparePrefetchDocuments(planningDirectory, ingestion, opt
       file: document.file,
       path: safePath(root, document.file),
       applicationReference: extra.applicationReference || document.applicationReference || "unknown",
+      applicationStatus: extra.applicationStatus || document.applicationStatus || "unknown",
       locationPrior: extra.locationPrior || null,
       explicitControlPoints: extra.explicitControlPoints || null,
       georeference: extra.georeference || null
@@ -118,7 +137,7 @@ export function createPriorityPlanningProcessors(options = {}) {
   async function getVisualRegistrationContext() {
     if (visualContext) return visualContext;
     if (typeof options.ensureVisualReference !== "function") {
-      if (!options.referenceImagePath) throw new Error("visual planning registration requires a reference source");
+      if (!options.referenceImagePath) throw recoverableReferenceError("visual planning registration requires a reference source");
       const referenceImagePath = path.resolve(options.referenceImagePath);
       visualContext = {
         referenceImagePath,
@@ -127,7 +146,9 @@ export function createPriorityPlanningProcessors(options = {}) {
       return visualContext;
     }
     visualContext = await options.ensureVisualReference();
-    if (!visualContext?.referenceImagePath || !visualContext?.referenceHash) throw new Error("visual reference resolver returned an incomplete context");
+    if (!visualContext?.referenceImagePath || !visualContext?.referenceHash) {
+      throw recoverableReferenceError("visual reference resolver returned an incomplete context");
+    }
     return visualContext;
   }
 
@@ -169,20 +190,26 @@ export async function runPlanningPrefetchFastPath(options = {}) {
   if (!options.planningDirectory) throw new Error("planningDirectory is required");
   if (!options.bbox) throw new Error("bbox is required");
 
+  const timing = createTimingAccumulator();
   const cache = options.cache || new FileArtifactCache(options.cacheRoot || ".project-gen-cache/artifacts");
-  const ingestion = await ingestPlanningPrefetch(options.planningDirectory, {
+  const ingestion = await timing.measure("ingestPrefetch", () => ingestPlanningPrefetch(options.planningDirectory, {
     cache,
     maxDocuments: options.maxDocuments,
     verificationConcurrency: options.verificationConcurrency
-  });
-  const documents = await preparePrefetchDocuments(options.planningDirectory, ingestion, options);
+  }));
+  const documents = await timing.measure("prepareDocuments", () => preparePrefetchDocuments(options.planningDirectory, ingestion, options));
+  const referenceFeatures = Array.isArray(options.referenceFeatures)
+    ? options.referenceFeatures
+    : options.osmSource?.payload
+      ? normalizeOsmReferenceFeatures(options.osmSource.payload, options.bbox)
+      : [];
 
   let resolvedReference = null;
   let referencePromise = null;
   async function ensureVisualReference() {
     if (resolvedReference) return resolvedReference;
     if (referencePromise) return referencePromise;
-    referencePromise = (async () => {
+    referencePromise = timing.measure("buildVisualReference", async () => {
       if (options.referenceImagePath) {
         const referenceImagePath = path.resolve(options.referenceImagePath);
         const referenceHash = options.referenceHash || await sha256File(referenceImagePath);
@@ -194,7 +221,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
         return resolvedReference;
       }
       const source = options.referenceSource || options.osmSource || null;
-      if (!source?.payload) throw new Error("visual registration fallback requires referenceImagePath or referenceSource payload");
+      if (!source?.payload) throw recoverableReferenceError("visual registration fallback unavailable because the reference source could not be acquired");
       const reference = await buildPlanningReference({
         source,
         bbox: options.bbox,
@@ -207,30 +234,38 @@ export async function runPlanningPrefetchFastPath(options = {}) {
         reference
       };
       return resolvedReference;
-    })();
+    });
     return referencePromise;
   }
 
-  const processors = createPriorityPlanningProcessors({ ...options, cache, ensureVisualReference });
-  const result = await runPlanningFastPath({
+  const priorityProcessors = createPriorityPlanningProcessors({ ...options, cache, ensureVisualReference });
+  const profiler = createPlanningProcessorProfiler(priorityProcessors);
+  const result = await timing.measure("planningFastPath", () => runPlanningFastPath({
     documents,
     cache,
-    processors,
+    processors: profiler.processors,
     referenceHash: options.referenceHash || null,
+    referenceFeatures,
     bbox: options.bbox,
     options: {
       concurrency: options.concurrency || 4,
       dpi: options.dpi || 240,
-      rendererVersion: options.rendererVersion || "render-v1",
-      extractorVersion: options.extractorVersion || "semantic-v2-lines",
+      rendererVersion: options.rendererVersion || "render-v2-adaptive-gray",
+      extractorVersion: options.extractorVersion || "semantic-v4-poppler-bounded-ocr",
       strongGeoreferenceVersion: options.strongGeoreferenceVersion || "strong-georef-v1",
       registrationVersion: options.registrationVersion || "registration-v2-priority",
       vectorizerVersion: options.vectorizerVersion || "vector-v1",
       planningAutomaticRegistrationConsensusM: options.planningAutomaticRegistrationConsensusM,
       planningAutomaticRegistrationMinConfidence: options.planningAutomaticRegistrationMinConfidence,
-      planningAutomaticRegistrationConsensusDocuments: options.planningAutomaticRegistrationConsensusDocuments
+      planningAutomaticRegistrationConsensusDocuments: options.planningAutomaticRegistrationConsensusDocuments,
+      planningAuthorityMinConfidence: options.planningAuthorityMinConfidence,
+      planningAuthorityMinOverlap: options.planningAuthorityMinOverlap,
+      planningAuthorityMaxOffsetM: options.planningAuthorityMaxOffsetM,
+      planningAuthorityToleranceM: options.planningAuthorityToleranceM,
+      planningAuthorityAllowGapFill: options.planningAuthorityAllowGapFill,
+      failOnRecoverablePageError: options.failOnRecoverablePageError
     }
-  });
+  }));
   return {
     source: "planning",
     status: "usable",
@@ -240,10 +275,21 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       stats: ingestion.stats
     },
     processedDocuments: documents.length,
-    reference: resolvedReference?.reference || { role: "registration-context-only", status: "not-needed" },
+    reference: resolvedReference?.reference || {
+      role: "registration-context-only",
+      status: options.osmSource?.status === "unavailable" ? "unavailable" : "not-needed"
+    },
     referenceHash: resolvedReference?.referenceHash || null,
-    ...result
+    referenceFeatureCount: referenceFeatures.length,
+    ...result,
+    metrics: {
+      ...result.metrics,
+      referenceFeatureCount: referenceFeatures.length,
+      evidenceDiagnostics: summarizePlanningEvidenceDiagnostics(result.documents),
+      processorTimings: profiler.snapshot(),
+      orchestrationTimings: timing.snapshot()
+    }
   };
 }
 
-export { documentPages, metadataIndex, locationPrior };
+export { documentPages, metadataIndex, locationPrior, recoverableReferenceError };
