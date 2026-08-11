@@ -6,6 +6,10 @@ on:
       - "src/planning/prefetch-hydrate.mjs"
       - "src/planning/native-workers.mjs"
       - "src/planning/fast-path.mjs"
+      - "src/planning/prefetch-runner.mjs"
+      - "src/planning/profiler.mjs"
+      - "src/planning/strong-georeference.mjs"
+      - "src/planning/reference-raster.mjs"
       - "src/sources/osm-overpass.mjs"
       - "src/sources/http-json.mjs"
       - "scripts/hydrate-planning-prefetch.mjs"
@@ -33,7 +37,7 @@ jobs:
       - name: Build pinned Alton planning manifest
         run: node benchmark/alton-planning-subset.mjs benchmark/alton-planning-subset
       - name: Hydrate real planning documents with manifest verification
-        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 4 --timeout-ms 45000
+        run: npm run planning:hydrate -- --planning-dir benchmark/alton-planning-subset --allow-legacy-http --concurrency 2 --timeout-ms 45000
       - name: Cold planning pass
         run: |
           rm -rf .alton-benchmark-cache benchmark-output/cold benchmark-output/warm
