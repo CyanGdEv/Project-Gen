@@ -23,6 +23,23 @@ function digest(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 20);
 }
 
+function applicationAuthorityContext(value) {
+  const provided = value !== null && value !== undefined && String(value).trim() !== "";
+  if (!provided) {
+    return {
+      applicationStatus: null,
+      worldAuthorityEligible: true,
+      authorityStatusReason: "application-status-not-provided-legacy"
+    };
+  }
+  const applicationStatus = normalizePlanningApplicationStatus(value);
+  return {
+    applicationStatus,
+    worldAuthorityEligible: planningApplicationWorldAuthorityEligible(applicationStatus),
+    authorityStatusReason: planningApplicationAuthorityReason(applicationStatus)
+  };
+}
+
 export function featureClassForPlanningRole(role) {
   return ROLE_CLASS[String(role || "").trim().toLowerCase()] || null;
 }
@@ -31,9 +48,7 @@ export function normalizePlanningVectors(vectors, context = {}) {
   const features = [];
   let withheld = 0;
   const withheldReasons = {};
-  const applicationStatus = normalizePlanningApplicationStatus(context.applicationStatus);
-  const worldAuthorityEligible = planningApplicationWorldAuthorityEligible(applicationStatus);
-  const authorityStatusReason = planningApplicationAuthorityReason(applicationStatus);
+  const authorityContext = applicationAuthorityContext(context.applicationStatus);
   for (const vector of vectors || []) {
     const role = String(vector?.role || vector?.properties?.planning_vector_role || "").trim().toLowerCase();
     const featureClass = featureClassForPlanningRole(role);
@@ -57,9 +72,9 @@ export function normalizePlanningVectors(vectors, context = {}) {
         planning_vector_role: role,
         planning_geometry_authority: "planning-drawing",
         planning_surface_authority: ["path", "path-material"].includes(featureClass) ? "planning-drawing" : undefined,
-        planningApplicationStatus: applicationStatus,
-        planningWorldAuthorityEligible: worldAuthorityEligible,
-        planningWorldAuthorityReason: authorityStatusReason,
+        planningApplicationStatus: authorityContext.applicationStatus,
+        planningWorldAuthorityEligible: authorityContext.worldAuthorityEligible,
+        planningWorldAuthorityReason: authorityContext.authorityStatusReason,
         applicationReference: context.applicationReference || null,
         documentId: context.documentId || null,
         sourceSha256: context.sourceSha256 || null,
