@@ -37,7 +37,7 @@ function unionBounds(words) {
 export function extractSemanticAnchorsFromTsv(tsv, options = {}) {
   const minConfidence = number(options.minConfidence, 35);
   const lines = String(tsv || "").split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return { anchors: [], text: "", sha256: createHash("sha256").update(String(tsv || "")).digest("hex") };
+  if (lines.length < 2) return { anchors: [], lines: [], text: "", sha256: createHash("sha256").update(String(tsv || "")).digest("hex") };
   const header = lines[0].split("\t");
   const index = Object.fromEntries(header.map((name, i) => [name, i]));
   for (const required of ["page_num", "block_num", "par_num", "line_num", "left", "top", "width", "height", "conf", "text"]) {
@@ -64,23 +64,22 @@ export function extractSemanticAnchorsFromTsv(tsv, options = {}) {
   }
 
   const anchors = [];
+  const lineRecords = [];
   const allText = [];
   for (const [lineId, words] of groups) {
     const text = words.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim();
+    const confidence = words.reduce((total, word) => total + word.confidence, 0) / words.length / 100;
+    const bounds = unionBounds(words);
     allText.push(text);
+    lineRecords.push({ lineId, text, confidence, bounds });
     const role = classifyPlanningSemanticLabel(text);
     if (!role) continue;
-    anchors.push({
-      lineId,
-      role,
-      text,
-      confidence: words.reduce((total, word) => total + word.confidence, 0) / words.length / 100,
-      bounds: unionBounds(words)
-    });
+    anchors.push({ lineId, role, text, confidence, bounds });
   }
   const normalizedText = allText.join("\n");
   return {
     anchors,
+    lines: lineRecords,
     text: normalizedText,
     sha256: createHash("sha256").update(normalizedText).digest("hex")
   };
