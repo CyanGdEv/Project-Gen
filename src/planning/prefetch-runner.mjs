@@ -5,6 +5,7 @@ import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
 import { summarizePlanningEvidenceDiagnostics } from "./diagnostics.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
+import { normalizeOsmReferenceFeatures } from "./osm-feature-authority.mjs";
 import { createPlanningProcessorProfiler, createTimingAccumulator } from "./profiler.mjs";
 import { buildPlanningReference } from "./reference-raster.mjs";
 import { resolveStrongGeoreference } from "./strong-georeference.mjs";
@@ -188,6 +189,11 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     verificationConcurrency: options.verificationConcurrency
   }));
   const documents = await timing.measure("prepareDocuments", () => preparePrefetchDocuments(options.planningDirectory, ingestion, options));
+  const referenceFeatures = Array.isArray(options.referenceFeatures)
+    ? options.referenceFeatures
+    : options.osmSource?.payload
+      ? normalizeOsmReferenceFeatures(options.osmSource.payload, options.bbox)
+      : [];
 
   let resolvedReference = null;
   let referencePromise = null;
@@ -230,6 +236,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     cache,
     processors: profiler.processors,
     referenceHash: options.referenceHash || null,
+    referenceFeatures,
     bbox: options.bbox,
     options: {
       concurrency: options.concurrency || 4,
@@ -242,6 +249,11 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       planningAutomaticRegistrationConsensusM: options.planningAutomaticRegistrationConsensusM,
       planningAutomaticRegistrationMinConfidence: options.planningAutomaticRegistrationMinConfidence,
       planningAutomaticRegistrationConsensusDocuments: options.planningAutomaticRegistrationConsensusDocuments,
+      planningAuthorityMinConfidence: options.planningAuthorityMinConfidence,
+      planningAuthorityMinOverlap: options.planningAuthorityMinOverlap,
+      planningAuthorityMaxOffsetM: options.planningAuthorityMaxOffsetM,
+      planningAuthorityToleranceM: options.planningAuthorityToleranceM,
+      planningAuthorityAllowGapFill: options.planningAuthorityAllowGapFill,
       failOnRecoverablePageError: options.failOnRecoverablePageError
     }
   }));
@@ -256,9 +268,11 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     processedDocuments: documents.length,
     reference: resolvedReference?.reference || { role: "registration-context-only", status: "not-needed" },
     referenceHash: resolvedReference?.referenceHash || null,
+    referenceFeatureCount: referenceFeatures.length,
     ...result,
     metrics: {
       ...result.metrics,
+      referenceFeatureCount: referenceFeatures.length,
       evidenceDiagnostics: summarizePlanningEvidenceDiagnostics(result.documents),
       processorTimings: profiler.snapshot(),
       orchestrationTimings: timing.snapshot()
