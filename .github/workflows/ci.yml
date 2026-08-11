@@ -27,8 +27,9 @@ jobs:
           gdaltransform --version
           python3 -c 'import cv2; print(cv2.__version__)'
       - run: npm run check
-      - name: Compile and self-test native registration worker
+      - name: Compile and self-test native planning workers
         run: |
           python3 -m py_compile src/planning/planning_auto_register.py
+          python3 -m py_compile src/planning/planning_reference.py
           npm run worker:self-test
       - run: npm test
