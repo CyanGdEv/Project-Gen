@@ -20,12 +20,30 @@ function responseHeader(response, name) {
   return response.headers?.get?.(name) || null;
 }
 
+function staleFallback(cached, now, staleIfErrorMs, error) {
+  if (!cached || staleIfErrorMs <= 0) return null;
+  const ageMs = Math.max(0, now - Number(cached.fetchedAt || 0));
+  if (ageMs > staleIfErrorMs) return null;
+  return {
+    ...cached.result,
+    cacheHit: true,
+    cacheMode: "stale-if-error",
+    provenance: {
+      ...(cached.result?.provenance || {}),
+      staleAt: now,
+      staleAgeMs: ageMs,
+      staleReason: error?.message || String(error)
+    }
+  };
+}
+
 export function createHttpJsonAdapter(options = {}) {
   const id = String(options.id || "").trim().toLowerCase();
   if (!id) throw new Error("HTTP JSON adapter requires id");
   if (typeof options.buildRequest !== "function") throw new Error(`${id} adapter requires buildRequest()`);
 
   const freshForMs = Math.max(0, Number(options.freshForMs ?? 6 * 60 * 60 * 1000));
+  const staleIfErrorMs = Math.max(0, Number(options.staleIfErrorMs ?? 0));
   const maxBytes = Math.max(1024, Number(options.maxBytes ?? 25 * 1024 * 1024));
   const timeoutMs = Math.max(1000, Number(options.timeoutMs ?? 25000));
 
@@ -65,50 +83,57 @@ export function createHttpJsonAdapter(options = {}) {
         : timeoutMs;
       const requestTimeoutMs = Math.max(1, Math.min(timeoutMs, graphRemainingMs));
       const signal = context.signal || AbortSignal.timeout(requestTimeoutMs);
-      const response = await fetchImpl(url, { method, headers: conditionalHeaders, body, signal });
-      if (response.status === 304 && cached) {
-        const refreshed = { ...cached, fetchedAt: now };
-        if (cache) await cache.put(requestKey, refreshed);
-        return { ...cached.result, cacheHit: true, cacheMode: "revalidated" };
-      }
-      if (!response.ok) throw new Error(`${id} source request failed with HTTP ${response.status}`);
 
-      const declaredLength = Number(responseHeader(response, "content-length") || 0);
-      if (declaredLength > maxBytes) throw new Error(`${id} source response exceeds byte ceiling`);
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > maxBytes) throw new Error(`${id} source response exceeds byte ceiling`);
-      let payload;
       try {
-        payload = JSON.parse(bytes.toString("utf8"));
-      } catch (error) {
-        throw new Error(`${id} source returned invalid JSON: ${error.message}`);
-      }
-
-      const contentSha256 = sha256(bytes);
-      const result = {
-        source: id,
-        status: "usable",
-        cacheHit: false,
-        cacheMode: cached ? "refreshed" : "miss",
-        payload,
-        provenance: {
-          url: url.toString(),
-          fetchedAt: now,
-          etag: responseHeader(response, "etag"),
-          lastModified: responseHeader(response, "last-modified"),
-          contentSha256,
-          bytes: bytes.length
+        const response = await fetchImpl(url, { method, headers: conditionalHeaders, body, signal });
+        if (response.status === 304 && cached) {
+          const refreshed = { ...cached, fetchedAt: now };
+          if (cache) await cache.put(requestKey, refreshed);
+          return { ...cached.result, cacheHit: true, cacheMode: "revalidated" };
         }
-      };
-      if (cache) {
-        await cache.put(requestKey, {
-          fetchedAt: now,
-          etag: result.provenance.etag,
-          lastModified: result.provenance.lastModified,
-          result
-        });
+        if (!response.ok) throw new Error(`${id} source request failed with HTTP ${response.status}`);
+
+        const declaredLength = Number(responseHeader(response, "content-length") || 0);
+        if (declaredLength > maxBytes) throw new Error(`${id} source response exceeds byte ceiling`);
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length > maxBytes) throw new Error(`${id} source response exceeds byte ceiling`);
+        let payload;
+        try {
+          payload = JSON.parse(bytes.toString("utf8"));
+        } catch (error) {
+          throw new Error(`${id} source returned invalid JSON: ${error.message}`);
+        }
+
+        const contentSha256 = sha256(bytes);
+        const result = {
+          source: id,
+          status: "usable",
+          cacheHit: false,
+          cacheMode: cached ? "refreshed" : "miss",
+          payload,
+          provenance: {
+            url: url.toString(),
+            fetchedAt: now,
+            etag: responseHeader(response, "etag"),
+            lastModified: responseHeader(response, "last-modified"),
+            contentSha256,
+            bytes: bytes.length
+          }
+        };
+        if (cache) {
+          await cache.put(requestKey, {
+            fetchedAt: now,
+            etag: result.provenance.etag,
+            lastModified: result.provenance.lastModified,
+            result
+          });
+        }
+        return result;
+      } catch (error) {
+        const stale = staleFallback(cached, now, staleIfErrorMs, error);
+        if (stale) return stale;
+        throw error;
       }
-      return result;
     }
   });
 }
