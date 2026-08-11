@@ -22,7 +22,7 @@ test("bounded OCR TSV coordinates rescale back into the main planning raster", (
   assert.ok(result.anchors[0].confidence > 0.94 && result.anchors[0].confidence < 0.96);
 });
 
-test("cacheable semantics-unavailable results do not discard the page or rerun on warm cache", async () => {
+test("cacheable semantics-unavailable results preserve the registered page and do not rerun on warm cache", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "project-gen-semantic-fallback-"));
   try {
     const cache = new FileArtifactCache(root);
@@ -61,8 +61,10 @@ test("cacheable semantics-unavailable results do not discard the page or rerun o
     };
     const cold = await runPlanningFastPath(args);
     const warm = await runPlanningFastPath(args);
-    assert.deepEqual(cold.georeference.acceptedIds, ["doc"]);
-    assert.deepEqual(warm.georeference.acceptedIds, ["doc"]);
+    assert.deepEqual(cold.georeference.candidateAcceptedIds, ["doc"]);
+    assert.deepEqual(warm.georeference.candidateAcceptedIds, ["doc"]);
+    assert.deepEqual(cold.georeference.acceptedIds, []);
+    assert.deepEqual(warm.georeference.acceptedIds, []);
     assert.equal(semanticCalls, 1);
     assert.equal(warm.metrics.semanticHits, 1);
     assert.equal(cold.metrics.pageFailures, 0);
