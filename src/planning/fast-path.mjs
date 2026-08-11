@@ -214,6 +214,7 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       id: document.id || document.sha256,
       sourceSha256: document.sha256,
       applicationReference: document.applicationReference || "unknown",
+      applicationStatus: document.applicationStatus || "unknown",
       document,
       pages: pageResults,
       automaticCandidate: best?.candidate || null,
@@ -246,10 +247,11 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     if (!candidateAcceptedIds.has(entry.id)) continue;
     const candidate = selectedCandidates.get(entry.id);
     const evaluation = options.enforceAuthorityGate === false
-      ? { accepted: true, mode: "disabled", confidence: Number(candidate?.confidence || 0), overlap: null, offsetM: null, thresholds: null, reasons: [] }
+      ? { accepted: true, mode: "disabled", applicationStatus: entry.applicationStatus, applicationStatusEligible: true, confidence: Number(candidate?.confidence || 0), overlap: null, offsetM: null, thresholds: null, reasons: [] }
       : evaluatePlanningAuthority(candidate, {
           bbox,
           locationPrior: entry.document?.locationPrior || null,
+          applicationStatus: entry.applicationStatus,
           minConfidence: options.planningAuthorityMinConfidence,
           minOverlap: options.planningAuthorityMinOverlap,
           maxOffsetM: options.planningAuthorityMaxOffsetM
@@ -288,6 +290,7 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       if (vector.cacheHit) metrics.vectorHits += 1;
       const normalized = normalizePlanningVectors(vector.value?.vectors || vector.value || [], {
         applicationReference: entry.applicationReference,
+        applicationStatus: entry.applicationStatus,
         documentId: entry.id,
         sourceSha256: entry.sourceSha256,
         page: selectedPage.page,
