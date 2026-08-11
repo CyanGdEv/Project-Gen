@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { evaluatePlanningAuthority } from "./authority-gate.mjs";
 import { automaticConsensusGroups, registrationVariantScore } from "./georeference.mjs";
 import { planningRegistrationKey, planningRenderKey, planningSemanticKey, planningStrongGeoreferenceKey, planningVectorKey } from "./cache-keys.mjs";
 import { normalizePlanningVectors } from "./vectorize.mjs";
@@ -78,6 +79,13 @@ function recordFailure(metrics, stage, error) {
   metrics.pageFailureCodes[code] = Number(metrics.pageFailureCodes[code] || 0) + 1;
 }
 
+function recordAuthorityRejection(metrics, evaluation) {
+  metrics.authorityRejected += 1;
+  for (const reason of evaluation.reasons || []) {
+    metrics.authorityRejectionReasons[reason] = Number(metrics.authorityRejectionReasons[reason] || 0) + 1;
+  }
+}
+
 async function resolvePageRegistration({ cache, processors, document, page, render, semantics, semanticHash, referenceHash, bbox, options, metrics }) {
   if (typeof processors.resolveStrongGeoreference === "function") {
     const strongKey = planningStrongGeoreferenceKey({
@@ -142,7 +150,10 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     pageFailureCodes: {},
     vectorFailures: 0,
     directGeoreferences: 0,
-    consensusGeoreferences: 0
+    consensusGeoreferences: 0,
+    authorityAccepted: 0,
+    authorityRejected: 0,
+    authorityRejectionReasons: {}
   };
 
   const prepared = await mapConcurrent(documents, concurrency, async (document) => {
@@ -225,12 +236,35 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
 
   const consensus = automaticConsensusGroups(consensusInput, options);
   const selectedCandidates = new Map([...consensus.selectedCandidates, ...directSelected]);
-  const acceptedIds = new Set([...consensus.accepted, ...directSelected.keys()]);
+  const candidateAcceptedIds = new Set([...consensus.accepted, ...directSelected.keys()]);
   metrics.directGeoreferences = directSelected.size;
   metrics.consensusGeoreferences = consensus.accepted.size;
 
-  const acceptedDocuments = prepared.filter((entry) => acceptedIds.has(entry.id));
-  const vectorizedRaw = await mapConcurrent(acceptedDocuments, concurrency, async (entry) => {
+  const authorityAcceptedIds = new Set();
+  const authorityEvaluations = [];
+  for (const entry of prepared) {
+    if (!candidateAcceptedIds.has(entry.id)) continue;
+    const candidate = selectedCandidates.get(entry.id);
+    const evaluation = options.enforceAuthorityGate === false
+      ? { accepted: true, mode: "disabled", confidence: Number(candidate?.confidence || 0), overlap: null, offsetM: null, thresholds: null, reasons: [] }
+      : evaluatePlanningAuthority(candidate, {
+          bbox,
+          locationPrior: entry.document?.locationPrior || null,
+          minConfidence: options.planningAuthorityMinConfidence,
+          minOverlap: options.planningAuthorityMinOverlap,
+          maxOffsetM: options.planningAuthorityMaxOffsetM
+        });
+    authorityEvaluations.push({ id: entry.id, applicationReference: entry.applicationReference, method: candidate?.method || null, directAuthority: Boolean(candidate?.directAuthority), ...evaluation });
+    if (evaluation.accepted) {
+      authorityAcceptedIds.add(entry.id);
+      metrics.authorityAccepted += 1;
+    } else {
+      recordAuthorityRejection(metrics, evaluation);
+    }
+  }
+
+  const authorityDocuments = prepared.filter((entry) => authorityAcceptedIds.has(entry.id));
+  const vectorizedRaw = await mapConcurrent(authorityDocuments, concurrency, async (entry) => {
     const selectedCandidate = selectedCandidates.get(entry.id);
     const selectedPage = entry.pages.find((page) => page.page === Number(selectedCandidate?.page || entry.selectedPage))
       || entry.pages.find((page) => page.candidate === selectedCandidate)
@@ -268,16 +302,28 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
   });
   const vectorized = vectorizedRaw.filter(Boolean);
 
+  const directAuthorityAcceptedIds = [...directSelected.keys()].filter((id) => authorityAcceptedIds.has(id));
+  const consensusAuthorityAcceptedIds = [...consensus.accepted].filter((id) => authorityAcceptedIds.has(id));
+
   return {
     documents: prepared,
     georeference: {
-      acceptedIds: [...acceptedIds].sort(),
-      directAcceptedIds: [...directSelected.keys()].sort(),
+      acceptedIds: [...authorityAcceptedIds].sort(),
+      candidateAcceptedIds: [...candidateAcceptedIds].sort(),
+      directAcceptedIds: directAuthorityAcceptedIds.sort(),
+      directCandidateIds: [...directSelected.keys()].sort(),
       consensusAcceptedIds: [...consensus.accepted].sort(),
+      consensusAuthorityAcceptedIds: consensusAuthorityAcceptedIds.sort(),
       evidence: consensus.evidence,
       minimumDocuments: consensus.minimumDocuments,
       minimumConfidence: consensus.minimumConfidence,
-      maxSeparationM: consensus.maxSeparationM
+      maxSeparationM: consensus.maxSeparationM,
+      authority: {
+        minConfidence: Number(options.planningAuthorityMinConfidence ?? 0.86),
+        minOverlap: Number(options.planningAuthorityMinOverlap ?? 0.18),
+        maxOffsetM: Number(options.planningAuthorityMaxOffsetM ?? 25),
+        evaluations: authorityEvaluations
+      }
     },
     consensus: {
       acceptedIds: [...consensus.accepted].sort(),
