@@ -5,6 +5,7 @@ import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
 import { planningStrongGeoreferenceKey } from "./cache-keys.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
+import { buildPlanningReference } from "./reference-raster.mjs";
 import { resolveStrongGeoreference } from "./strong-georeference.mjs";
 
 function safePath(root, relative) {
@@ -143,7 +144,6 @@ export function createPriorityPlanningProcessors(options = {}) {
 
 export async function runPlanningPrefetchFastPath(options = {}) {
   if (!options.planningDirectory) throw new Error("planningDirectory is required");
-  if (!options.referenceImagePath) throw new Error("referenceImagePath is required for visual-registration fallback");
   if (!options.bbox) throw new Error("bbox is required");
 
   const cache = options.cache || new FileArtifactCache(options.cacheRoot || ".project-gen-cache/artifacts");
@@ -153,8 +153,23 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     verificationConcurrency: options.verificationConcurrency
   });
   const documents = await preparePrefetchDocuments(options.planningDirectory, ingestion, options);
-  const referenceHash = options.referenceHash || await sha256File(path.resolve(options.referenceImagePath));
-  const processors = createPriorityPlanningProcessors({ ...options, cache, referenceImagePath: options.referenceImagePath });
+
+  let referenceImagePath = options.referenceImagePath ? path.resolve(options.referenceImagePath) : null;
+  let reference = null;
+  if (!referenceImagePath) {
+    const source = options.referenceSource || options.osmSource || null;
+    if (!source?.payload) throw new Error("referenceImagePath or referenceSource payload is required for visual-registration fallback");
+    reference = await buildPlanningReference({
+      source,
+      bbox: options.bbox,
+      cache,
+      options: options.referenceOptions || {}
+    });
+    referenceImagePath = reference.path;
+  }
+
+  const referenceHash = options.referenceHash || reference?.sha256 || await sha256File(referenceImagePath);
+  const processors = createPriorityPlanningProcessors({ ...options, cache, referenceImagePath });
   const result = await runPlanningFastPath({
     documents,
     cache,
@@ -182,6 +197,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
       stats: ingestion.stats
     },
     processedDocuments: documents.length,
+    reference: reference ? { ...reference } : { path: referenceImagePath, sha256: referenceHash, role: "registration-context-only" },
     referenceHash,
     ...result
   };
