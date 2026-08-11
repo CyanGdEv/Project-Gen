@@ -55,6 +55,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install native regression dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-opencv
+          python3 -c 'import cv2; print(cv2.__version__)'
       - name: Validate Project Gen entrypoints
         run: |
           npm run check
