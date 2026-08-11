@@ -106,9 +106,13 @@ async function main() {
     withinFiveMinuteTarget: totalMs <= 300000,
     planning: {
       processedDocuments: result.processedDocuments,
+      candidateAcceptedDocuments: result.georeference.candidateAcceptedIds?.length ?? result.georeference.acceptedIds.length,
       acceptedDocuments: result.georeference.acceptedIds.length,
+      directCandidateDocuments: result.georeference.directCandidateIds?.length ?? result.georeference.directAcceptedIds.length,
       directAcceptedDocuments: result.georeference.directAcceptedIds.length,
-      consensusAcceptedDocuments: result.georeference.consensusAcceptedIds.length,
+      consensusCandidateDocuments: result.georeference.consensusAcceptedIds.length,
+      consensusAcceptedDocuments: result.georeference.consensusAuthorityAcceptedIds?.length ?? result.georeference.consensusAcceptedIds.length,
+      authorityGate: result.georeference.authority || null,
       features: result.features.length,
       metrics: result.metrics,
       ingestion: result.ingestion,
@@ -121,7 +125,7 @@ async function main() {
       endpointAttempt: osmSource.provenance?.endpointAttempt || 1,
       attemptedEndpoints: osmSource.provenance?.attemptedEndpoints || [],
       contentSha256: osmSource.provenance?.contentSha256 || null,
-      role: "registration-context-and-gap-fill-only"
+      role: "registration-context-only-never-rendered"
     }
   };
   await Promise.all([
@@ -131,6 +135,7 @@ async function main() {
   console.log(JSON.stringify({
     status: report.status,
     documents: report.planning.processedDocuments,
+    candidates: report.planning.candidateAcceptedDocuments,
     accepted: report.planning.acceptedDocuments,
     features: report.planning.features,
     totalMs,
