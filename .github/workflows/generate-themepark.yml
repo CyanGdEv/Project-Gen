@@ -27,10 +27,12 @@ on:
       - "scripts/publish-mcworld-release.sh"
       - "scripts/validate-mcworld.sh"
       - "scripts/run-planning-pass.mjs"
+      - "scripts/build-vme-planning-bridge.mjs"
       - "benchmark/alton-planning-subset.mjs"
       - "benchmark/normalize-alton-planning-corpus.mjs"
       - "src/planning/**"
       - "src/sources/**"
+      - "src/world/**"
       - "package.json"
 
 permissions:
@@ -203,6 +205,26 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `features=${geo.features.length}\nride_layouts=${rideLayouts}\nplanning_ms=${report.timings?.planningMs || 0}\n`);
           NODE
 
+      - name: Build pinned VME planning compatibility input
+        id: compiler_bridge
+        if: ${{ inputs.preset == 'alton-towers' }}
+        shell: bash
+        run: |
+          npm run world:bridge-vme -- \
+            --input generation-output/planning/planning-authority.geojson \
+            --output generation-output/planning/vme-planning-authority.geojson \
+            --report generation-output/planning/vme-planning-bridge-report.json
+          test -s generation-output/planning/vme-planning-authority.geojson
+          test -s generation-output/planning/vme-planning-bridge-report.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const r = JSON.parse(fs.readFileSync('generation-output/planning/vme-planning-bridge-report.json'));
+          if (r.compiler?.sha !== process.env.PROJECT_GEN_COMPILER_SHA) throw new Error('planning bridge compiler SHA does not match workflow pin');
+          if (r.outputFeatures <= 0) throw new Error('planning bridge produced no compiler-compatible features');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `input_features=${r.inputFeatures}\noutput_features=${r.outputFeatures}\nwithheld_features=${r.withheldFeatures}\n`);
+          console.log(JSON.stringify({ inputFeatures: r.inputFeatures, outputFeatures: r.outputFeatures, withheldFeatures: r.withheldFeatures, withheldByClass: r.withheldByClass }));
+          NODE
+
       - name: Save Project Gen planning and source caches
         if: ${{ inputs.preset == 'alton-towers' && always() }}
         uses: actions/cache/save@v4
@@ -216,7 +238,7 @@ jobs:
         if: ${{ inputs.preset == 'alton-towers' }}
         shell: bash
         run: |
-          printf 'TPMAP_PLANNING_GEOMETRY_PATH=%s\n' "$GITHUB_WORKSPACE/generation-output/planning/planning-authority.geojson" >> "$GITHUB_ENV"
+          printf 'TPMAP_PLANNING_GEOMETRY_PATH=%s\n' "$GITHUB_WORKSPACE/generation-output/planning/vme-planning-authority.geojson" >> "$GITHUB_ENV"
           printf 'TPMAP_PLANNING_PREFETCH_DIR=%s\n' "$GITHUB_WORKSPACE/benchmark/alton-planning-subset" >> "$GITHUB_ENV"
 
       - name: Check out pinned Bedrock compiler bridge
@@ -294,6 +316,8 @@ jobs:
           SUMMARY_PLANNING_FEATURES: ${{ steps.planning.outputs.features || '0' }}
           SUMMARY_RIDE_LAYOUTS: ${{ steps.planning.outputs.ride_layouts || '0' }}
           SUMMARY_PLANNING_MS: ${{ steps.planning.outputs.planning_ms || '0' }}
+          SUMMARY_BRIDGE_OUTPUT: ${{ steps.compiler_bridge.outputs.output_features || '0' }}
+          SUMMARY_BRIDGE_WITHHELD: ${{ steps.compiler_bridge.outputs.withheld_features || '0' }}
           SUMMARY_STRATEGY: ${{ steps.build.outputs.strategy || 'none' }}
         run: |
           {
@@ -308,7 +332,9 @@ jobs:
               printf '%s\n' "- Planning-authoritative features: ${SUMMARY_PLANNING_FEATURES}"
               printf '%s\n' "- Planning ride-layout features: ${SUMMARY_RIDE_LAYOUTS}"
               printf '%s\n' "- Project Gen planning time: ${SUMMARY_PLANNING_MS} ms"
-              printf '%s\n' '- OSM role: registration/reference only; Project Gen planning GeoJSON is passed to the Bedrock compiler as planning geometry.'
+              printf '%s\n' "- Pinned-compiler planning features: ${SUMMARY_BRIDGE_OUTPUT}"
+              printf '%s\n' "- Temporarily withheld from pinned compiler: ${SUMMARY_BRIDGE_WITHHELD}"
+              printf '%s\n' '- Full Project Gen planning authority remains preserved in diagnostics; the compatibility bridge never substitutes OSM geometry.'
             else
               printf '%s\n' '- Project Gen planning corpus: not yet configured for this preset; compiler fallback sources are used.'
             fi
@@ -332,6 +358,8 @@ jobs:
           path: |
             generation-output/planning/planning-pass-report.json
             generation-output/planning/planning-authority.geojson
+            generation-output/planning/vme-planning-authority.geojson
+            generation-output/planning/vme-planning-bridge-report.json
             generation-output/world/validation.txt
             vme-compiler/ci-diagnostics/**
           if-no-files-found: warn
