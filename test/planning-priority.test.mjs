@@ -23,7 +23,7 @@ function directCandidate() {
   };
 }
 
-test("direct georeference bypasses cross-document visual consensus", async () => {
+test("direct approved georeference bypasses cross-document visual consensus and becomes authority", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "project-gen-direct-georef-"));
   try {
     const cache = new FileArtifactCache(root);
@@ -40,15 +40,17 @@ test("direct georeference bypasses cross-document visual consensus", async () =>
       vectorizePage: async () => ({ vectors: [{ role: "site-path-centerline-candidate", geometry: { type: "LineString", coordinates: [[-1.89, 52.99], [-1.88, 52.985]] } }] })
     };
     const result = await runPlanningFastPath({
-      documents: [{ id: "single", sha256: "sha-single", applicationReference: "APP/1", pages: [1] }],
+      documents: [{ id: "single", sha256: "sha-single", applicationReference: "APP/1", applicationStatus: "approved", pages: [1] }],
       cache,
       processors,
       bbox: [52.97, -1.90, 53.00, -1.85]
     });
+    assert.deepEqual(result.georeference.directCandidateIds, ["single"]);
     assert.deepEqual(result.georeference.directAcceptedIds, ["single"]);
     assert.deepEqual(result.georeference.consensusAcceptedIds, []);
     assert.equal(result.features.length, 1);
     assert.equal(result.metrics.directGeoreferences, 1);
+    assert.equal(result.metrics.authorityAccepted, 1);
     assert.equal(visualReferenceCalls, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -82,7 +84,7 @@ test("null strong georeference falls through to visual registration once", async
       vectorizePage: async () => ({ vectors: [] })
     };
     await runPlanningFastPath({
-      documents: [{ id: "a", sha256: "a", applicationReference: "APP/1" }],
+      documents: [{ id: "a", sha256: "a", applicationReference: "APP/1", applicationStatus: "approved" }],
       cache,
       processors,
       bbox: [52.97, -1.90, 53.00, -1.85]
