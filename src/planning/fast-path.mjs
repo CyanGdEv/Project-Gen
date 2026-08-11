@@ -214,7 +214,9 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
       id: document.id || document.sha256,
       sourceSha256: document.sha256,
       applicationReference: document.applicationReference || "unknown",
-      applicationStatus: document.applicationStatus || "unknown",
+      // Real planning-prefetch ingress always supplies an explicit status string, including "unknown".
+      // Preserve a genuinely absent status here so legacy/synthetic fixtures are not misclassified as real unknown-status evidence.
+      applicationStatus: document.applicationStatus ?? null,
       document,
       pages: pageResults,
       automaticCandidate: best?.candidate || null,
