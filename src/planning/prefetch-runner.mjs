@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { FileArtifactCache } from "../cache.mjs";
 import { ingestPlanningPrefetch } from "../sources/planning-prefetch.mjs";
+import { summarizePlanningEvidenceDiagnostics } from "./diagnostics.mjs";
 import { runPlanningFastPath } from "./fast-path.mjs";
 import { createNativePlanningProcessors, runTool, sha256File } from "./native-workers.mjs";
 import { createPdfTextSemanticExtractor } from "./pdf-text-semantics.mjs";
@@ -269,6 +270,7 @@ export async function runPlanningPrefetchFastPath(options = {}) {
     ...result,
     metrics: {
       ...result.metrics,
+      evidenceDiagnostics: summarizePlanningEvidenceDiagnostics(result.documents),
       processorTimings: profiler.snapshot(),
       orchestrationTimings: timing.snapshot()
     }
