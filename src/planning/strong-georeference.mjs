@@ -92,7 +92,8 @@ function embeddedExtentControls(info, render) {
   const width = Number(render?.width || info?.size?.[0] || 0);
   const height = Number(render?.height || info?.size?.[1] || 0);
   if (!(width > 0 && height > 0)) return null;
-  const pixels = [[0, 0], [width, 0], [width, height], [0, height]];
+  // GDAL's WGS84 footprint ring follows the raster perimeter UL -> LL -> LR -> UR.
+  const pixels = [[0, 0], [0, height], [width, height], [width, 0]];
   return corners.map((point, index) => ({ x: pixels[index][0], y: pixels[index][1], ...point }));
 }
 
