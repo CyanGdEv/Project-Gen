@@ -2,6 +2,26 @@
 
 Project Gen is the high-throughput successor to **Voxel Mapping Engine**: a Minecraft Bedrock theme-park generator designed to recreate real parks at **1:1 scale** and deliver a directly importable `.mcworld` with a **five-minute generation target**.
 
+## Generate Themepark in GitHub Actions
+
+Project Gen is designed to run from **GitHub Actions**. No local terminal is required for the player-facing generation flow.
+
+After the workflow is on the default branch:
+
+1. Open **Actions**.
+2. Select **Generate Themepark**.
+3. Tap **Run workflow**.
+4. Choose `alton-towers`, `chessington`, or `thorpe-park`.
+5. Choose `benchmark` or `verified` accuracy.
+6. Start the workflow.
+7. Open the completed run summary and use the **Direct download** link.
+
+The generated world is published as a raw `.mcworld` Release asset so it can be opened directly in Minecraft. The world is **not** nested inside an Actions artifact ZIP. Planning reports, authority GeoJSON and build diagnostics are uploaded separately.
+
+For Alton Towers, the workflow runs Project Gen's planning-authority pipeline first and passes its accepted `planning-authority.geojson` to the Bedrock compiler. OSM remains registration/reference context and cannot replace planning-authoritative geometry or materials.
+
+The current Bedrock packaging stage is an explicit, immutable bridge to `CyanGdEv/Voxel-Mapping-Engine-` commit `3564d8099f740ae6c1936053e90f765faca8f9b9`. Project Gen owns planning acquisition, validation, georeference and authority; the next compiler phase will replace this bridge with Project Gen's native streaming world compiler without changing the Actions UX.
+
 ## Core contract
 
 - **Planning drawings are the ultimate truth** once they pass provenance, status, georeference-confidence, park-geofence and licensing gates.
@@ -17,7 +37,7 @@ Project Gen is the high-throughput successor to **Voxel Mapping Engine**: a Mine
 3. **Strong evidence before heuristics.** Georeference priority is embedded geospatial metadata → explicit controls → printed coordinate/grid controls → OpenCV visual registration.
 4. **Lazy visual matching.** OSM reference raster generation and OpenCV are skipped entirely when stronger georeference evidence already resolves a drawing.
 5. **Bounded parallel execution.** Expensive independent work runs concurrently inside the 300-second generation contract.
-6. **Streaming world compilation.** The next compiler layer will consume normalized authority features spatially rather than waiting for unrelated park data.
+6. **Streaming world compilation.** The native compiler layer will consume normalized authority features spatially rather than waiting for unrelated park data.
 
 ## Native planning pass
 
@@ -55,7 +75,7 @@ Outputs in `project-gen-planning-output/`:
 - `planning-authority.geojson` — accepted planning-authoritative features;
 - `planning-pass-report.json` — source/cache/georeference counts and wall-clock timing against the 300-second target.
 
-The planning pass does **not** yet compile a Bedrock world. The next layer is the streaming terrain/material/world compiler that consumes this authority output plus terrain and uncovered fallback evidence.
+The native planning pass itself does not package Bedrock LevelDB yet. The **Generate Themepark** Action bridges that authority output into the pinned Bedrock compiler so end-to-end `.mcworld` generation can already be exercised through GitHub Actions while the native streaming compiler is built.
 
 ## Fidelity protections
 
@@ -69,7 +89,8 @@ Current regression gates cover:
 - lazy OSM/OpenCV fallback;
 - bounded 650 m registration search ROI and local candidate evaluation;
 - OCR semantic roles for paths, ride layouts/supports, buildings, boundaries, water, rocks and terrain detail;
-- native Poppler/Tesseract/OpenCV/GDAL tool availability in CI.
+- native Poppler/Tesseract/OpenCV/GDAL tool availability in CI;
+- final `.mcworld` archive integrity before direct release publication.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the source-parity plan, five-minute runtime design, and phased path to a full high-fidelity `.mcworld` generator.
 
