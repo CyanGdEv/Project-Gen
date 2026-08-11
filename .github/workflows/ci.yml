@@ -11,11 +11,22 @@ permissions:
 jobs:
   core:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install native planning tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr python3-opencv
+          pdftoppm -v
+          tesseract --version | head -n 1
+          python3 -c 'import cv2; print(cv2.__version__)'
       - run: npm run check
+      - name: Compile and self-test native registration worker
+        run: |
+          python3 -m py_compile src/planning/planning_auto_register.py
+          npm run worker:self-test
       - run: npm test
