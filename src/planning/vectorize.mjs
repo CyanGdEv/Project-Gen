@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  normalizePlanningApplicationStatus,
+  planningApplicationAuthorityReason,
+  planningApplicationWorldAuthorityEligible
+} from "./authority-status.mjs";
 
 const ROLE_CLASS = Object.freeze({
   "site-path-centerline-candidate": "path",
@@ -26,6 +31,9 @@ export function normalizePlanningVectors(vectors, context = {}) {
   const features = [];
   let withheld = 0;
   const withheldReasons = {};
+  const applicationStatus = normalizePlanningApplicationStatus(context.applicationStatus);
+  const worldAuthorityEligible = planningApplicationWorldAuthorityEligible(applicationStatus);
+  const authorityStatusReason = planningApplicationAuthorityReason(applicationStatus);
   for (const vector of vectors || []) {
     const role = String(vector?.role || vector?.properties?.planning_vector_role || "").trim().toLowerCase();
     const featureClass = featureClassForPlanningRole(role);
@@ -49,6 +57,9 @@ export function normalizePlanningVectors(vectors, context = {}) {
         planning_vector_role: role,
         planning_geometry_authority: "planning-drawing",
         planning_surface_authority: ["path", "path-material"].includes(featureClass) ? "planning-drawing" : undefined,
+        planningApplicationStatus: applicationStatus,
+        planningWorldAuthorityEligible: worldAuthorityEligible,
+        planningWorldAuthorityReason: authorityStatusReason,
         applicationReference: context.applicationReference || null,
         documentId: context.documentId || null,
         sourceSha256: context.sourceSha256 || null,
