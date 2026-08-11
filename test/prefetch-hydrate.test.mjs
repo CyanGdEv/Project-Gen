@@ -54,7 +54,37 @@ test("planning hydrator downloads and then reuses exact manifest-pinned evidence
   }
 });
 
-test("planning hydrator rejects hash mismatches without leaving partial evidence", async () => {
+test("planning hydrator retries transient fetch failures but still verifies exact evidence", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "project-gen-hydrate-retry-"));
+  try {
+    const body = Buffer.from("retry-safe planning evidence");
+    const entry = {
+      kind: "document",
+      url: "https://planning.example/document.pdf",
+      file: `files/${sha(body)}.pdf`,
+      bytes: body.length,
+      sha256: sha(body),
+      mime: "application/pdf"
+    };
+    await fixture(root, [entry]);
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError("fetch failed");
+      return new Response(body, { status: 200 });
+    };
+    const result = await hydratePlanningPrefetch(root, { fetchImpl, retries: 2, retryDelayMs: 0 });
+    assert.equal(result.downloaded, 1);
+    assert.equal(result.retriedDocuments, 1);
+    assert.equal(result.totalAttempts, 2);
+    assert.equal(calls, 2);
+    assert.deepEqual(await readFile(path.join(root, entry.file)), body);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("planning hydrator does not retry integrity mismatches and leaves no partial evidence", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "project-gen-hydrate-bad-"));
   try {
     const expected = Buffer.from("expected");
@@ -68,10 +98,19 @@ test("planning hydrator rejects hash mismatches without leaving partial evidence
       mime: "application/pdf"
     };
     await fixture(root, [entry]);
+    let calls = 0;
     await assert.rejects(
-      hydratePlanningPrefetch(root, { fetchImpl: async () => new Response(actual, { status: 200 }) }),
+      hydratePlanningPrefetch(root, {
+        retries: 4,
+        retryDelayMs: 0,
+        fetchImpl: async () => {
+          calls += 1;
+          return new Response(actual, { status: 200 });
+        }
+      }),
       /sha256 mismatch/
     );
+    assert.equal(calls, 1);
     await assert.rejects(readFile(path.join(root, entry.file)), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -99,8 +138,11 @@ test("legacy HTTP transport requires explicit opt-in and same official host", as
       if (String(url).startsWith("https:")) throw new Error("legacy TLS unavailable");
       return new Response(body, { status: 200 });
     };
-    await assert.rejects(hydratePlanningPrefetch(root, { fetchImpl }), /legacy TLS unavailable/);
-    const result = await hydratePlanningPrefetch(root, { fetchImpl, allowLegacyHttpTransport: true });
+    await assert.rejects(
+      hydratePlanningPrefetch(root, { fetchImpl, retries: 0, retryDelayMs: 0 }),
+      /legacy TLS unavailable/
+    );
+    const result = await hydratePlanningPrefetch(root, { fetchImpl, allowLegacyHttpTransport: true, retries: 0 });
     assert.equal(result.downloaded, 1);
     assert.equal(seen.at(-1), "http://planning.example/document.pdf");
   } finally {
