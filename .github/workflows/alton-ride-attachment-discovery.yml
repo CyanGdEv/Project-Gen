@@ -48,6 +48,10 @@ jobs:
             drawingAttachments: d.drawingAttachments.length,
             proposedDrawingAttachments: d.proposedDrawingAttachments.length,
             rideLayoutAttachments: d.rideLayoutAttachments.length,
+            pageDiagnostics: d.pageDiagnostics || null,
+            navigation: d.navigation || [],
+            followed: d.followed || [],
+            attempts: d.attemptLog || [],
             top: d.attachments.slice(0, 30).map(x => ({ imageName: x.imageName, title: x.title, rowText: x.rowText, classification: x.classification, priority: x.priority, narrative: x.narrative, proposed: x.proposed, existing: x.existing, rideLayout: x.rideLayout }))
           };
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## SMD/2016/0315 attachment discovery\n\n\`\`\`json\n${JSON.stringify(summary, null, 2)}\n\`\`\`\n`);
