@@ -31,8 +31,10 @@ async function cachedStage(cache, key, producer, validator = null) {
 
 function candidateForPage(registration, page) {
   if (!registration || !["accepted", "candidate"].includes(registration.status)) return null;
+  const method = String(registration.method || (registration.status === "accepted" ? "automatic-linework-registration" : "automatic-linework-candidate"));
   return {
-    method: registration.status === "accepted" ? "automatic-linework-registration" : "automatic-linework-candidate",
+    method,
+    directAuthority: Boolean(registration.directAuthority),
     page,
     pageWidth: Number(registration.pageWidth || 0),
     pageHeight: Number(registration.pageHeight || 0),
@@ -56,7 +58,11 @@ function candidateForPage(registration, page) {
 function bestPageCandidate(pages) {
   return pages
     .filter((page) => page.candidate)
-    .sort((a, b) => registrationVariantScore(b.candidate) - registrationVariantScore(a.candidate) || a.page - b.page)[0] || null;
+    .sort((a, b) => {
+      const directDelta = Number(Boolean(b.candidate.directAuthority)) - Number(Boolean(a.candidate.directAuthority));
+      if (directDelta) return directDelta;
+      return registrationVariantScore(b.candidate) - registrationVariantScore(a.candidate) || a.page - b.page;
+    })[0] || null;
 }
 
 export async function runPlanningFastPath({ documents, cache, processors, referenceHash, bbox = null, options = {} }) {
@@ -65,7 +71,16 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     if (typeof processors?.[name] !== "function") throw new Error(`planning fast path requires processors.${name}()`);
   }
   const concurrency = Math.max(1, Number(options.concurrency || 4));
-  const metrics = { renderHits: 0, semanticHits: 0, registrationHits: 0, vectorHits: 0, documents: documents.length, pages: 0 };
+  const metrics = {
+    renderHits: 0,
+    semanticHits: 0,
+    registrationHits: 0,
+    vectorHits: 0,
+    documents: documents.length,
+    pages: 0,
+    directGeoreferences: 0,
+    consensusGeoreferences: 0
+  };
 
   const prepared = await mapConcurrent(documents, concurrency, async (document) => {
     const pages = Array.isArray(document.pages) && document.pages.length ? document.pages : [1];
@@ -110,14 +125,32 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
     };
   });
 
-  const consensus = automaticConsensusGroups(prepared, options);
-  const acceptedDocuments = prepared.filter((entry) => consensus.accepted.has(entry.id));
+  const directSelected = new Map();
+  const consensusInput = [];
+  for (const entry of prepared) {
+    const direct = entry.pages
+      .filter((page) => page.candidate?.directAuthority && page.registration?.status === "accepted")
+      .sort((a, b) => registrationVariantScore(b.candidate) - registrationVariantScore(a.candidate) || a.page - b.page)[0];
+    if (direct) {
+      directSelected.set(entry.id, direct.candidate);
+      continue;
+    }
+    if (entry.automaticCandidate) consensusInput.push(entry);
+  }
+
+  const consensus = automaticConsensusGroups(consensusInput, options);
+  const selectedCandidates = new Map([...consensus.selectedCandidates, ...directSelected]);
+  const acceptedIds = new Set([...consensus.accepted, ...directSelected.keys()]);
+  metrics.directGeoreferences = directSelected.size;
+  metrics.consensusGeoreferences = consensus.accepted.size;
+
+  const acceptedDocuments = prepared.filter((entry) => acceptedIds.has(entry.id));
   const vectorized = await mapConcurrent(acceptedDocuments, concurrency, async (entry) => {
-    const selectedCandidate = consensus.selectedCandidates.get(entry.id);
+    const selectedCandidate = selectedCandidates.get(entry.id);
     const selectedPage = entry.pages.find((page) => page.page === Number(selectedCandidate?.page || entry.selectedPage))
       || entry.pages.find((page) => page.candidate === selectedCandidate)
       || entry.pages.find((page) => page.page === entry.selectedPage);
-    if (!selectedPage) throw new Error(`consensus selected missing page for ${entry.id}`);
+    if (!selectedPage) throw new Error(`selected georeference missing page for ${entry.id}`);
     const transformHash = hashJson(selectedCandidate);
     const vector = await cache.getOrCreate(planningVectorKey({
       pageSha256: selectedPage.render.sha256,
@@ -145,6 +178,15 @@ export async function runPlanningFastPath({ documents, cache, processors, refere
 
   return {
     documents: prepared,
+    georeference: {
+      acceptedIds: [...acceptedIds].sort(),
+      directAcceptedIds: [...directSelected.keys()].sort(),
+      consensusAcceptedIds: [...consensus.accepted].sort(),
+      evidence: consensus.evidence,
+      minimumDocuments: consensus.minimumDocuments,
+      minimumConfidence: consensus.minimumConfidence,
+      maxSeparationM: consensus.maxSeparationM
+    },
     consensus: {
       acceptedIds: [...consensus.accepted].sort(),
       evidence: consensus.evidence,
