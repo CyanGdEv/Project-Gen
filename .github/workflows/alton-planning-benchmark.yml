@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "src/planning/prefetch-hydrate.mjs"
+      - "src/sources/osm-overpass.mjs"
+      - "src/sources/http-json.mjs"
       - "scripts/hydrate-planning-prefetch.mjs"
       - "scripts/run-planning-pass.mjs"
       - "benchmark/alton-planning-subset.mjs"
@@ -50,6 +52,7 @@ jobs:
             acceptedDocuments: { cold: cold.planning.acceptedDocuments, warm: warm.planning.acceptedDocuments },
             features: { cold: cold.planning.features, warm: warm.planning.features },
             cache: { cold: cold.planning.metrics, warm: warm.planning.metrics },
+            osm: { cold: cold.osm, warm: warm.osm },
             withinFiveMinuteTarget: { cold: cold.withinFiveMinuteTarget, warm: warm.withinFiveMinuteTarget }
           };
           fs.writeFileSync('benchmark-output/benchmark-summary.json', JSON.stringify(summary, null, 2));
